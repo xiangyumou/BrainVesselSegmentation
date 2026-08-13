@@ -12,6 +12,7 @@ build/
 
 # Research data and generated outputs
 /data/
+/datasets/
 /runs/
 /predictions/
 /reports/
