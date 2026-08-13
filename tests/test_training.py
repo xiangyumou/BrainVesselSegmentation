@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import torch
 import pytest
 
@@ -11,7 +13,7 @@ from bvs.training.losses import (
     TemperatureKLLoss,
 )
 from bvs.training.stages import build_stage
-from bvs.training.trainer import validation_improved
+from bvs.training.trainer import _resume, _run_epoch, validation_improved
 
 
 def test_single_training_and_validation_step() -> None:
@@ -55,8 +57,8 @@ def test_temperature_kl_and_contrastive_match_legacy_formulas() -> None:
     expected_kl = torch.nn.functional.kl_div(
         torch.nn.functional.log_softmax(student / temperature, dim=1),
         torch.nn.functional.softmax(teacher / temperature, dim=1),
-        reduction="mean",
-    ) * temperature**2
+        reduction="sum",
+    ) / student.numel() * temperature**2
     assert torch.allclose(TemperatureKLLoss(temperature)(student, teacher), expected_kl)
     a = torch.nn.functional.normalize(torch.randn(3, 8), dim=1)
     b = torch.nn.functional.normalize(torch.randn(3, 8), dim=1)
@@ -159,3 +161,83 @@ def test_transfer_freeze_encoder_excludes_encoder_gradients(tmp_path) -> None:
     assert isinstance(model, ConfigurableLingfengModel)
     assert model.encoders["mra"].e1_c1.conv.weight.grad is None
     assert model.student_decoder.seg_logit.conv.weight.grad is not None
+
+
+class _AccumulationRuntime:
+    def __init__(self) -> None:
+        self.parameter = torch.nn.Parameter(torch.tensor(0.0))
+        self.trainable_parameters = [self.parameter]
+
+    def train(self, mode: bool = True) -> None:
+        pass
+
+    def loss(self, batch):
+        loss = self.parameter * batch["image"].float().mean()
+        return loss, {"segmentation": float(loss.detach())}
+
+
+def test_gradient_accumulation_scales_partial_final_group() -> None:
+    runtime = _AccumulationRuntime()
+    optimizer = torch.optim.SGD(runtime.trainable_parameters, lr=1.0)
+    loader = [{"image": torch.tensor(float(value))} for value in range(1, 6)]
+    _run_epoch(runtime, loader, torch.device("cpu"), optimizer, 4, False, None)
+    assert torch.allclose(runtime.parameter, torch.tensor(-7.5))
+
+
+def _supervised_resume_fixture(tmp_path):
+    from bvs.checkpoints import make_unified_checkpoint
+    from bvs.config import load_config, model_spec_from_config
+
+    config = load_config(
+        Path(__file__).resolve().parents[1]
+        / "configs/train/unet3d_topcow_binary.yaml"
+    )
+    config["model"]["base_channels"] = 1
+    runtime = build_stage(config, torch.device("cpu"))
+    optimizer = torch.optim.Adam(runtime.trainable_parameters, lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=2, gamma=0.5)
+    payload = make_unified_checkpoint(
+        stage="supervised",
+        model=runtime.model,
+        model_spec=model_spec_from_config(config),
+        resolved_config={},
+        epoch=3,
+        optimizer=optimizer,
+        scheduler=scheduler,
+    )
+    checkpoint = tmp_path / "resume.pt"
+    torch.save(payload, checkpoint)
+    config["training"]["resume_checkpoint"] = str(checkpoint)
+    return config, runtime, optimizer, scheduler, checkpoint
+
+
+def test_resume_restores_complete_unified_checkpoint(tmp_path) -> None:
+    config, runtime, optimizer, scheduler, _ = _supervised_resume_fixture(tmp_path)
+    result = _resume(runtime, optimizer, scheduler, config)
+    assert result[0] == 3
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("stage", "teacher", "stage"),
+        ("scheduler_state", None, "scheduler_state"),
+        ("optimizer_state", {}, "optimizer_state"),
+        (
+            "student_projection_state",
+            {"weight": torch.ones(1, 1)},
+            "unexpected student_projection_state",
+        ),
+    ],
+)
+def test_resume_rejects_incompatible_checkpoint(
+    tmp_path, field, value, message
+) -> None:
+    config, runtime, optimizer, scheduler, checkpoint = _supervised_resume_fixture(
+        tmp_path
+    )
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    payload[field] = value
+    torch.save(payload, checkpoint)
+    with pytest.raises(RuntimeError, match=message):
+        _resume(runtime, optimizer, scheduler, config)

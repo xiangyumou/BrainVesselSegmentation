@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import pytest
 
-from bvs.evaluation import segmentation_metrics
+from bvs.evaluation import evaluate_directories, segmentation_metrics
 from bvs.inference import (
     TEACHER_INPUT_ERROR,
     discover_inference_cases,
@@ -109,3 +109,52 @@ def test_teacher_discovery_rejects_single_file(tmp_path: Path) -> None:
     }
     with pytest.raises(ValueError, match=TEACHER_INPUT_ERROR):
         discover_inference_cases(config, source, "teacher")
+
+
+def _write_mask(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    nib.save(
+        nib.Nifti1Image(np.ones((4, 4, 4), dtype=np.uint8), np.eye(4)),
+        path,
+    )
+
+
+def test_evaluation_rejects_missing_predictions_by_default(tmp_path: Path) -> None:
+    predictions = tmp_path / "predictions"
+    labels = tmp_path / "labels"
+    _write_mask(predictions / "one.nii.gz")
+    _write_mask(labels / "one.nii.gz")
+    _write_mask(labels / "two.nii.gz")
+    with pytest.raises(ValueError, match=r"missing_predictions=\['two\.nii\.gz'\]"):
+        evaluate_directories(predictions, labels, tmp_path / "output")
+
+
+def test_evaluation_rejects_unexpected_predictions_by_default(
+    tmp_path: Path,
+) -> None:
+    predictions = tmp_path / "predictions"
+    labels = tmp_path / "labels"
+    _write_mask(predictions / "one.nii.gz")
+    _write_mask(predictions / "two.nii.gz")
+    _write_mask(labels / "one.nii.gz")
+    with pytest.raises(
+        ValueError, match=r"unexpected_predictions=\['two\.nii\.gz'\]"
+    ):
+        evaluate_directories(predictions, labels, tmp_path / "output")
+
+
+def test_partial_evaluation_reports_case_set_differences(tmp_path: Path) -> None:
+    predictions = tmp_path / "predictions"
+    labels = tmp_path / "labels"
+    _write_mask(predictions / "one.nii.gz")
+    _write_mask(predictions / "unexpected.nii.gz")
+    _write_mask(labels / "one.nii.gz")
+    _write_mask(labels / "missing.nii.gz")
+    report = evaluate_directories(
+        predictions, labels, tmp_path / "output", strict=False
+    )
+    assert report["case_count"] == 1
+    assert report["prediction_case_count"] == 2
+    assert report["label_case_count"] == 2
+    assert report["missing_predictions"] == ["missing.nii.gz"]
+    assert report["unexpected_predictions"] == ["unexpected.nii.gz"]

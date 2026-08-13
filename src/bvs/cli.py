@@ -61,6 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--predictions", required=True)
     evaluate.add_argument("--labels", required=True)
     evaluate.add_argument("--output", required=True)
+    evaluate.add_argument("--allow-partial", action="store_true")
 
     smoke = commands.add_parser("smoke-test")
     smoke.add_argument("--config")
@@ -131,7 +132,14 @@ def main(argv: list[str] | None = None) -> int:
             )
         _print({"device": policy.device.type, "predictions": outputs})
     elif args.command == "evaluate":
-        _print(evaluate_directories(args.predictions, args.labels, args.output))
+        _print(
+            evaluate_directories(
+                args.predictions,
+                args.labels,
+                args.output,
+                strict=not args.allow_partial,
+            )
+        )
     elif args.command == "smoke-test":
         _print(
             run_smoke_test(

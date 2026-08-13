@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -144,6 +145,19 @@ def _integer(value: Any, location: str, *, minimum: int = 1) -> None:
         raise ValueError(f"{location} must be a {qualifier} integer")
 
 
+def _number(
+    value: Any, location: str, *, minimum: float = 0.0, inclusive: bool = True
+) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{location} must be a number")
+    valid = math.isfinite(float(value)) and (
+        value >= minimum if inclusive else value > minimum
+    )
+    if not valid:
+        qualifier = "at least" if inclusive else "greater than"
+        raise ValueError(f"{location} must be {qualifier} {minimum}")
+
+
 def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     _unknown(config, TOP_LEVEL_KEYS, "configuration")
     required = {"experiment_name", "stage", "model", "data"}
@@ -254,6 +268,13 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             )
         if not isinstance(model["freeze_encoder"], bool):
             raise ValueError("model.freeze_encoder must be a boolean")
+    stage = config["stage"]
+    if model_name == "standard_unet3d" and stage != "supervised":
+        raise ValueError("standard_unet3d only supports supervised stage")
+    if model_name == "lingfeng_student_transfer" and stage != "supervised":
+        raise ValueError("lingfeng_student_transfer only supports supervised stage")
+    if stage in {"teacher", "student_kd"} and model_name != "configurable_lingfeng":
+        raise ValueError(f"{stage} requires model.name=configurable_lingfeng")
     if data.get("adapter") not in {"lingfeng_case_directory", "topcow"}:
         raise ValueError("data.adapter must be lingfeng_case_directory or topcow")
     for key in ("patch_size", "crop_or_pad_size"):
@@ -275,16 +296,74 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     _integer(data.get("cache_max_cases", 2), "data.cache_max_cases", minimum=0)
     for key in ("epochs", "batch_size", "gradient_accumulation"):
         _integer(training.get(key), f"training.{key}")
+    _number(
+        training.get("learning_rate"),
+        "training.learning_rate",
+        minimum=0.0,
+        inclusive=False,
+    )
+    _number(training.get("weight_decay"), "training.weight_decay")
+    if training.get("optimizer") != "adam":
+        raise ValueError("training.optimizer must be adam")
+    scheduler = training.get("scheduler", {})
+    if scheduler.get("name") != "step_lr":
+        raise ValueError("training.scheduler.name must be step_lr")
+    _integer(scheduler.get("step_size"), "training.scheduler.step_size")
+    _number(
+        scheduler.get("gamma"),
+        "training.scheduler.gamma",
+        minimum=0.0,
+        inclusive=False,
+    )
     if training.get("early_stopping_patience") is not None:
         _integer(
             training["early_stopping_patience"],
             "training.early_stopping_patience",
         )
+    for key in ("gradient_clip_norm", "logits_clip"):
+        if training.get(key) is not None:
+            _number(
+                training[key],
+                f"training.{key}",
+                minimum=0.0,
+                inclusive=False,
+            )
+    segmentation = loss.get("segmentation", {})
+    for key in ("cross_entropy_weight", "dice_weight"):
+        _number(segmentation.get(key), f"loss.segmentation.{key}")
+    logit_distillation = loss.get("logit_distillation", {})
+    _number(
+        logit_distillation.get("temperature"),
+        "loss.logit_distillation.temperature",
+        minimum=0.0,
+        inclusive=False,
+    )
+    _number(
+        logit_distillation.get("weight"),
+        "loss.logit_distillation.weight",
+    )
+    feature_distillation = loss.get("feature_distillation", {})
+    _number(
+        feature_distillation.get("weight"),
+        "loss.feature_distillation.weight",
+    )
+    _number(
+        feature_distillation.get("margin"),
+        "loss.feature_distillation.margin",
+    )
+    _integer(
+        feature_distillation.get("projection_dim"),
+        "loss.feature_distillation.projection_dim",
+    )
     amp = training.get("amp")
     if amp not in {"auto", "true", "false", True, False}:
         raise ValueError("training.amp must be auto, true, or false")
     if inference.get("branch") not in {"student", "teacher"}:
         raise ValueError("inference.branch must be student or teacher")
+    if inference.get("branch") == "teacher" and model_name != "configurable_lingfeng":
+        raise ValueError(
+            "inference.branch=teacher requires model.name=configurable_lingfeng"
+        )
     if inference.get("compatibility_mode") not in {"gaussian", "torchio"}:
         raise ValueError(
             "inference.compatibility_mode must be gaussian or torchio"

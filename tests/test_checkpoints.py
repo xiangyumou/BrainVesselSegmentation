@@ -136,3 +136,94 @@ def test_prediction_checkpoint_spec_mismatch_is_explicit(tmp_path: Path) -> None
     )
     with pytest.raises(RuntimeError, match="checkpoint=.*config="):
         load_prediction_checkpoint(config, checkpoint, "cpu")
+
+
+def test_four_modality_checkpoint_supports_single_modality_student_view(
+    tmp_path: Path,
+) -> None:
+    config = load_config(
+        Path(__file__).resolve().parents[1]
+        / "configs/reproduction/lingfeng_student_eval_legacy_code.yaml"
+    )
+    config["model"]["base_channels"] = 2
+    checkpoint_spec = {
+        "name": "configurable_lingfeng",
+        "modalities": ["mra", "t1", "t2", "pd"],
+        "student_modality": "mra",
+        "in_channels": {"mra": 1, "t1": 1, "t2": 1, "pd": 1},
+        "num_classes": 2,
+        "base_channels": 2,
+    }
+    source = build_lingfeng_from_spec(checkpoint_spec)
+    checkpoint = tmp_path / "four_modalities.pt"
+    torch.save(
+        {
+            "schema_version": 1,
+            "model_spec": checkpoint_spec,
+            "model_state": source.state_dict(),
+        },
+        checkpoint,
+    )
+    loaded = load_prediction_checkpoint(config, checkpoint, "cpu")
+    image = torch.randn(1, 1, 16, 16, 16)
+    with torch.inference_mode():
+        expected = source.forward_student(image)["logits"]
+        actual = loaded.forward_student(image)["logits"]
+    assert torch.equal(actual, expected)
+
+
+def test_student_view_rejects_student_architecture_mismatch(tmp_path: Path) -> None:
+    config = load_config(
+        Path(__file__).resolve().parents[1]
+        / "configs/reproduction/lingfeng_student_eval_legacy_code.yaml"
+    )
+    config["model"]["base_channels"] = 2
+    checkpoint_spec = {
+        "name": "configurable_lingfeng",
+        "modalities": ["mra", "t1"],
+        "student_modality": "mra",
+        "in_channels": {"mra": 1, "t1": 1},
+        "num_classes": 3,
+        "base_channels": 2,
+    }
+    checkpoint = tmp_path / "wrong_classes.pt"
+    torch.save(
+        {
+            "schema_version": 1,
+            "model_spec": checkpoint_spec,
+            "model_state": build_lingfeng_from_spec(checkpoint_spec).state_dict(),
+        },
+        checkpoint,
+    )
+    with pytest.raises(
+        RuntimeError, match="Student prediction model spec is incompatible"
+    ):
+        load_prediction_checkpoint(config, checkpoint, "cpu")
+
+
+def test_teacher_view_still_requires_exact_model_spec(tmp_path: Path) -> None:
+    config = load_config(
+        Path(__file__).resolve().parents[1]
+        / "configs/reproduction/lingfeng_student_eval_legacy_code.yaml"
+    )
+    config["model"]["base_channels"] = 2
+    config["inference"]["branch"] = "teacher"
+    checkpoint_spec = {
+        "name": "configurable_lingfeng",
+        "modalities": ["mra", "t1"],
+        "student_modality": "mra",
+        "in_channels": {"mra": 1, "t1": 1},
+        "num_classes": 2,
+        "base_channels": 2,
+    }
+    checkpoint = tmp_path / "teacher.pt"
+    torch.save(
+        {
+            "schema_version": 1,
+            "model_spec": checkpoint_spec,
+            "model_state": build_lingfeng_from_spec(checkpoint_spec).state_dict(),
+        },
+        checkpoint,
+    )
+    with pytest.raises(RuntimeError, match="Checkpoint model spec is incompatible"):
+        load_prediction_checkpoint(config, checkpoint, "cpu")

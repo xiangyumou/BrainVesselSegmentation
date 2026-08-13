@@ -106,6 +106,26 @@ def _require_matching_spec(
         )
 
 
+def _require_matching_student_spec(
+    checkpoint_spec: dict[str, Any], requested_spec: dict[str, Any]
+) -> None:
+    student_modality = requested_spec.get("student_modality")
+    compatible = (
+        checkpoint_spec.get("name") == requested_spec.get("name")
+        and student_modality == checkpoint_spec.get("student_modality")
+        and student_modality in checkpoint_spec.get("modalities", [])
+        and requested_spec.get("in_channels", {}).get(student_modality)
+        == checkpoint_spec.get("in_channels", {}).get(student_modality)
+        and requested_spec.get("num_classes") == checkpoint_spec.get("num_classes")
+        and requested_spec.get("base_channels") == checkpoint_spec.get("base_channels")
+    )
+    if not compatible:
+        raise RuntimeError(
+            "Student prediction model spec is incompatible: "
+            f"checkpoint={checkpoint_spec}, config={requested_spec}"
+        )
+
+
 def load_prediction_checkpoint(
     config: dict[str, Any],
     checkpoint: str | Path,
@@ -133,8 +153,14 @@ def load_prediction_checkpoint(
                 "configurable_lingfeng prediction requires a schema_version 1 "
                 "checkpoint containing model_spec and model_state"
             )
-        _require_matching_spec(payload, requested_spec)
-        model = build_lingfeng_from_spec(requested_spec)
+        checkpoint_spec = payload["model_spec"]
+        if config["inference"]["branch"] == "student":
+            _require_matching_student_spec(checkpoint_spec, requested_spec)
+            build_spec = checkpoint_spec
+        else:
+            _require_matching_spec(payload, requested_spec)
+            build_spec = requested_spec
+        model = build_lingfeng_from_spec(build_spec)
         model.load_state_dict(state, strict=True)
     elif name == "standard_unet3d":
         if payload.get("schema_version") == 1 and "model_spec" in payload:

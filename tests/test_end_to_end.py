@@ -71,7 +71,20 @@ def test_synthetic_train_predict_evaluate(tmp_path: Path) -> None:
     checkpoint = run_dir / "checkpoints/best.pt"
     history = run_dir / "metrics/history.csv"
     summary = run_dir / "metrics/summary.json"
-    assert checkpoint.is_file() and history.is_file() and summary.is_file()
+    environment = run_dir / "environment.json"
+    assert (
+        checkpoint.is_file()
+        and history.is_file()
+        and summary.is_file()
+        and environment.is_file()
+    )
+    environment_report = json.loads(environment.read_text(encoding="utf-8"))
+    assert environment_report["resume_checkpoint"] is None
+    assert environment_report["resume_from_epoch"] == 0
+    training_report = json.loads(summary.read_text(encoding="utf-8"))
+    assert training_report["start_epoch"] == 0
+    assert training_report["epochs_completed"] == 1
+    assert training_report["last_epoch"] == 1
     with history.open(newline="", encoding="utf-8") as stream:
         row = next(csv.DictReader(stream))
     assert all(np.isfinite(float(row[key])) for key in row if key != "is_best")

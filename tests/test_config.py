@@ -80,3 +80,69 @@ def test_freeze_encoder_transfer_is_valid() -> None:
         CONFIG.parents[1] / "train/lingfeng_transfer_topcow_binary.yaml"
     )
     assert validate_config(copy.deepcopy(config))["model"]["freeze_encoder"] is False
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value", "message"),
+    [
+        ("training", "learning_rate", 0, "learning_rate"),
+        ("training", "weight_decay", -1, "weight_decay"),
+        ("training", "learning_rate", float("nan"), "learning_rate"),
+        ("training", "gradient_clip_norm", 0, "gradient_clip_norm"),
+        ("training", "logits_clip", -1, "logits_clip"),
+    ],
+)
+def test_training_numeric_boundaries(
+    section: str, field: str, value: object, message: str
+) -> None:
+    config = _config()
+    config[section][field] = value
+    with pytest.raises(ValueError, match=message):
+        validate_config(config)
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value", "message"),
+    [
+        ("segmentation", "dice_weight", -1, "dice_weight"),
+        ("logit_distillation", "temperature", 0, "temperature"),
+        ("logit_distillation", "weight", -1, "weight"),
+        ("feature_distillation", "margin", -1, "margin"),
+        ("feature_distillation", "projection_dim", 0, "projection_dim"),
+    ],
+)
+def test_loss_numeric_boundaries(
+    section: str, field: str, value: object, message: str
+) -> None:
+    config = _config()
+    config["loss"][section][field] = value
+    with pytest.raises(ValueError, match=message):
+        validate_config(config)
+
+
+def test_unsupported_optimizer_and_scheduler_fail_during_config_loading() -> None:
+    config = _config()
+    config["training"]["optimizer"] = "sgd"
+    with pytest.raises(ValueError, match="optimizer"):
+        validate_config(config)
+    config = _config()
+    config["training"]["scheduler"]["name"] = "cosine"
+    with pytest.raises(ValueError, match="scheduler.name"):
+        validate_config(config)
+
+
+def test_standard_unet_rejects_teacher_stage_and_branch() -> None:
+    config = _config()
+    config["stage"] = "teacher"
+    with pytest.raises(ValueError, match="supervised"):
+        validate_config(config)
+    config = _config()
+    config["inference"]["branch"] = "teacher"
+    with pytest.raises(ValueError, match="branch=teacher"):
+        validate_config(config)
+
+
+def test_all_repository_configs_validate() -> None:
+    root = CONFIG.parents[2]
+    for path in sorted((root / "configs").rglob("*.yaml")):
+        load_config(path)

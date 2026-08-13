@@ -172,6 +172,10 @@ bvs evaluate --predictions predictions/internal \
   --labels /path/to/labels --output reports/internal
 ```
 
+Evaluation requires prediction and label filenames to match exactly by default.
+Use `--allow-partial` only when intentionally evaluating their intersection;
+the report will list missing and unexpected cases.
+
 Student prediction accepts one NIfTI or a flat directory of NIfTI files. Teacher prediction
 requires either a Lingfeng case directory containing every configured modality, a root whose
 direct child directories are complete cases, or a TopCoW dataset root:
@@ -273,6 +277,16 @@ bvs smoke-test \
 ```
 
 The student inference view accesses only the configured student modality.
+For unified Lingfeng checkpoints, the complete architecture is reconstructed from
+the checkpoint model specification so a converted four-modality checkpoint can
+be used with the single-modality student inference configuration above. The
+student modality, input channels, class count, and base channel count must still
+match exactly.
+
+Converted legacy checkpoints are intended for prediction or pretrained
+initialization. They are not complete training-resume checkpoints because the
+legacy files do not contain every optimizer, scheduler, random, and projection
+state required by `training.resume_checkpoint`.
 
 Valid high-level configuration fields are `model`, `data`, `training`, `loss`, and
 `inference`; unknown fields fail during loading. Removed no-op fields include

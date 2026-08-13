@@ -169,7 +169,9 @@ def _run_epoch(
         )
         with torch.set_grad_enabled(training), amp_context:
             loss, components = runtime.loss(batch)
-            scaled_loss = loss / accumulation_steps
+            group_start = (step // accumulation_steps) * accumulation_steps
+            group_size = min(accumulation_steps, len(loader) - group_start)
+            scaled_loss = loss / group_size
         if not torch.isfinite(loss):
             raise FloatingPointError(f"Non-finite loss encountered: {float(loss)}")
         if training:
@@ -361,21 +363,52 @@ def _resume(
         return 0, None, None, None, None, 0
     path = project_path(config, value)
     payload = torch.load(path, map_location="cpu", weights_only=False)
+    prefix = "Resume checkpoint is incompatible:"
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{prefix} checkpoint must be a mapping")
     if payload.get("schema_version") != 1:
-        raise RuntimeError("Resume checkpoint must use unified schema_version 1")
-    runtime.model.load_state_dict(payload["model_state"], strict=True)
-    if runtime.student_projection is not None:
-        state = payload.get("student_projection_state")
-        if state is None:
-            raise RuntimeError("Resume checkpoint is missing student projection state")
-        runtime.student_projection.load_state_dict(state, strict=True)
-    if runtime.teacher_projection is not None:
-        state = payload.get("teacher_projection_state")
-        if state is None:
-            raise RuntimeError("Resume checkpoint is missing teacher projection state")
-        runtime.teacher_projection.load_state_dict(state, strict=True)
-    optimizer.load_state_dict(payload["optimizer_state"])
-    scheduler.load_state_dict(payload["scheduler_state"])
+        raise RuntimeError(f"{prefix} schema_version must be 1")
+    if payload.get("stage") != config["stage"]:
+        raise RuntimeError(
+            f"{prefix} stage checkpoint={payload.get('stage')}, "
+            f"config={config['stage']}"
+        )
+    requested_spec = model_spec_from_config(config)
+    if payload.get("model_spec") != requested_spec:
+        raise RuntimeError(
+            f"{prefix} model_spec checkpoint={payload.get('model_spec')}, "
+            f"config={requested_spec}"
+        )
+    for key in ("model_state", "optimizer_state", "scheduler_state"):
+        state = payload.get(key)
+        if not isinstance(state, dict) or not state:
+            raise RuntimeError(f"{prefix} missing required {key}")
+    if payload.get("epoch") is None:
+        raise RuntimeError(f"{prefix} missing required epoch")
+    projection_runtimes = {
+        "student_projection_state": runtime.student_projection,
+        "teacher_projection_state": runtime.teacher_projection,
+    }
+    for key, projection in projection_runtimes.items():
+        state = payload.get(key)
+        if projection is not None and state is None:
+            raise RuntimeError(f"{prefix} missing required {key}")
+        if projection is None and state is not None:
+            raise RuntimeError(f"{prefix} unexpected {key} for stage {runtime.stage}")
+    try:
+        runtime.model.load_state_dict(payload["model_state"], strict=True)
+        if runtime.student_projection is not None:
+            runtime.student_projection.load_state_dict(
+                payload["student_projection_state"], strict=True
+            )
+        if runtime.teacher_projection is not None:
+            runtime.teacher_projection.load_state_dict(
+                payload["teacher_projection_state"], strict=True
+            )
+        optimizer.load_state_dict(payload["optimizer_state"])
+        scheduler.load_state_dict(payload["scheduler_state"])
+    except (KeyError, TypeError, ValueError, RuntimeError) as error:
+        raise RuntimeError(f"{prefix} state restoration failed: {error}") from error
     _restore_random_state(payload.get("random_state"))
     return (
         int(payload["epoch"]),
@@ -415,6 +448,10 @@ def train_from_config(config: dict[str, Any]) -> Path:
     start_epoch, best_loss, best_dice, best_cldice, best_epoch, stale_epochs = _resume(
         runtime, optimizer, scheduler, config
     )
+    resume_value = training.get("resume_checkpoint")
+    resume_path = (
+        str(project_path(config, resume_value)) if resume_value else None
+    )
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = (
@@ -438,6 +475,8 @@ def train_from_config(config: dict[str, Any]) -> Path:
                 "torch": torch.__version__,
                 "device": policy.device.type,
                 "amp_enabled": policy.amp_enabled,
+                "resume_checkpoint": resume_path,
+                "resume_from_epoch": start_epoch,
             },
             indent=2,
         ),
@@ -536,6 +575,7 @@ def train_from_config(config: dict[str, Any]) -> Path:
         "stage": config["stage"],
         "device": policy.device.type,
         "amp_enabled": policy.amp_enabled,
+        "start_epoch": start_epoch,
         "epochs_completed": len(history),
         "last_epoch": history[-1]["epoch"] if history else start_epoch,
         "best_validation_loss": best_loss,

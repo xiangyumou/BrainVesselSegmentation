@@ -89,11 +89,12 @@ class TemperatureKLLoss(nn.Module):
         self, student_logits: torch.Tensor, teacher_logits: torch.Tensor
     ) -> torch.Tensor:
         temperature = self.temperature
-        return F.kl_div(
+        divergence = F.kl_div(
             F.log_softmax(student_logits / temperature, dim=1),
             F.softmax(teacher_logits / temperature, dim=1),
-            reduction="mean",
-        ) * (temperature * temperature)
+            reduction="sum",
+        )
+        return divergence / student_logits.numel() * (temperature * temperature)
 
 
 class MetricContrastiveLoss(nn.Module):

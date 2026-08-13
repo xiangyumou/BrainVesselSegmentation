@@ -50,17 +50,38 @@ def _bootstrap_ci(values: np.ndarray, seed: int = 42, samples: int = 2000) -> li
 
 
 def evaluate_directories(
-    predictions: str | Path, labels: str | Path, output: str | Path
+    predictions: str | Path,
+    labels: str | Path,
+    output: str | Path,
+    *,
+    strict: bool = True,
 ) -> dict:
     prediction_dir, label_dir, output_dir = Path(predictions), Path(labels), Path(output)
-    prediction_files = sorted(prediction_dir.glob("*.nii.gz"))
-    if not prediction_files:
+    prediction_by_name = {
+        path.name: path for path in sorted(prediction_dir.glob("*.nii.gz"))
+    }
+    label_by_name = {
+        path.name: path for path in sorted(label_dir.glob("*.nii.gz"))
+    }
+    if not prediction_by_name:
         raise FileNotFoundError(f"No .nii.gz predictions found in {prediction_dir}")
+    prediction_names = set(prediction_by_name)
+    label_names = set(label_by_name)
+    missing_predictions = sorted(label_names - prediction_names)
+    unexpected_predictions = sorted(prediction_names - label_names)
+    if strict and (missing_predictions or unexpected_predictions):
+        raise ValueError(
+            "Prediction/label case sets do not match: "
+            f"missing_predictions={missing_predictions}, "
+            f"unexpected_predictions={unexpected_predictions}"
+        )
+    matched_names = sorted(prediction_names & label_names)
+    if not matched_names:
+        raise ValueError("Prediction and label directories contain no matching cases")
     rows = []
-    for prediction_path in prediction_files:
-        label_path = label_dir / prediction_path.name
-        if not label_path.exists():
-            raise FileNotFoundError(f"Missing label for {prediction_path.name}: {label_path}")
+    for name in matched_names:
+        prediction_path = prediction_by_name[name]
+        label_path = label_by_name[name]
         prediction_image = nib.load(str(prediction_path))
         label_image = nib.load(str(label_path))
         if prediction_image.shape != label_image.shape:
@@ -78,7 +99,14 @@ def evaluate_directories(
         writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
-    summary = {"case_count": len(rows), "metrics": {}}
+    summary = {
+        "case_count": len(rows),
+        "label_case_count": len(label_by_name),
+        "prediction_case_count": len(prediction_by_name),
+        "missing_predictions": missing_predictions,
+        "unexpected_predictions": unexpected_predictions,
+        "metrics": {},
+    }
     for metric in ("dice", "iou", "precision", "recall", "cldice"):
         values = np.asarray([row[metric] for row in rows], dtype=np.float64)
         summary["metrics"][metric] = {
@@ -88,4 +116,3 @@ def evaluate_directories(
         }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary
-
