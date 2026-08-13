@@ -1,0 +1,22 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Research data and generated outputs
+/data/
+/runs/
+/predictions/
+/reports/
+
+# Original source drops and model weights
+legacy/source_drop/
+artifacts/checkpoints/**/*.pt
+artifacts/checkpoints/**/*.pth

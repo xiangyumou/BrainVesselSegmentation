@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brain-vessel-segmentation"
+version = "0.1.0"
+description = "Reproducible 3D brain vessel segmentation baselines for TopCoW MRA"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  "torch==2.4.0",
+  "torchvision==0.19.0",
+  "torchio==0.21.0",
+  "nibabel==5.3.2",
+  "SimpleITK==2.5.3",
+  "numpy==1.26.4",
+  "scipy==1.13.1",
+  "pandas==2.2.3",
+  "scikit-image==0.24.0",
+  "PyYAML==6.0.2",
+  "tensorboard==2.19.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest==8.3.5"]
+
+[project.scripts]
+bvs = "bvs.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+

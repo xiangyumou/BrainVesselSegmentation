@@ -1,0 +1,33 @@
+experiment_name: lingfeng_student_transfer_topcow_binary
+seed: 42
+device: auto
+output_root: runs
+model:
+  name: lingfeng_student_transfer
+  in_channels: 1
+  out_channels: 2
+  pretrained_checkpoint: artifacts/checkpoints/lingfeng/student_best_checkpoint_multimodaltune9.pt
+  freeze_encoder: false
+data:
+  root: null
+  split_file: configs/splits/topcow_binary_seed42.json
+  patch_size: [48, 48, 48]
+  positive_probability: 0.7
+  samples_per_case: 4
+  validation_samples_per_case: 1
+  num_workers: 0
+training:
+  epochs: 200
+  early_stopping_patience: 20
+  batch_size: 1
+  gradient_accumulation: 4
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  scheduler_step_size: 10
+  scheduler_gamma: 0.8
+  ce_weight: 1.0
+  dice_weight: 1.0
+inference:
+  window_size: [48, 48, 48]
+  overlap: [24, 24, 24]
+
