@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,13 @@ from .topcow import (
     binary_label,
     discover_topcow_multimodal_cases,
 )
-from .transforms import load_training_arrays, sample_patch
+from .transforms import (
+    crop_or_pad_array,
+    load_training_arrays,
+    preprocess_volume,
+    sample_multimodal_patch,
+    sample_patch,
+)
 
 
 @dataclass(frozen=True)
@@ -118,42 +125,25 @@ def validate_multimodal_case(
     }
 
 
-def _torchio_subject(
-    case: MultimodalCase,
-    crop_or_pad_size: tuple[int, int, int] | None,
-    normalization: str,
-    augmentation: dict[str, Any] | None,
-) -> Any:
-    try:
-        import torchio as tio
-    except ImportError as error:
-        raise RuntimeError(
-            "The multimodal patch pipeline requires TorchIO; install project dependencies"
-        ) from error
-    subject = tio.Subject(
-        **{name: tio.ScalarImage(path) for name, path in case.modalities.items()},
-        label=tio.LabelMap(case.label),
-    )
-    transforms: list[tio.Transform] = []
-    if crop_or_pad_size:
-        transforms.append(tio.CropOrPad(crop_or_pad_size, padding_mode="reflect"))
-    if normalization == "torchio_zscore":
-        transforms.append(tio.ZNormalization())
-    elif normalization not in {"none", None}:
-        raise ValueError(f"Unknown normalization: {normalization}")
-    if augmentation and augmentation.get("enabled"):
-        unknown = set(augmentation) - {"enabled"}
-        if unknown:
-            raise ValueError(f"Unknown augmentation fields: {sorted(unknown)}")
-        transforms.extend(
-            [
-                tio.RandomBiasField(),
-                tio.RandomNoise(),
-                tio.RandomFlip(axes=(0,)),
-                tio.OneOf({tio.RandomAffine(): 0.8, tio.RandomElasticDeformation(): 0.2}),
-            ]
-        )
-    return tio.Compose(transforms)(subject) if transforms else subject
+class _CaseCache:
+    def __init__(self, maximum: int) -> None:
+        self.maximum = maximum
+        self.values: OrderedDict[tuple[Any, ...], Any] = OrderedDict()
+
+    def get(self, key: tuple[Any, ...]) -> Any | None:
+        if key not in self.values:
+            return None
+        value = self.values.pop(key)
+        self.values[key] = value
+        return value
+
+    def put(self, key: tuple[Any, ...], value: Any) -> None:
+        if self.maximum == 0:
+            return
+        self.values.pop(key, None)
+        self.values[key] = value
+        while len(self.values) > self.maximum:
+            self.values.popitem(last=False)
 
 
 class MultimodalPatchDataset(Dataset):
@@ -165,9 +155,12 @@ class MultimodalPatchDataset(Dataset):
         patch_size: tuple[int, int, int] = (48, 48, 48),
         samples_per_volume: int = 30,
         crop_or_pad_size: tuple[int, int, int] | None = None,
-        normalization: str = "torchio_zscore",
+        normalization: str = "nonzero_zscore",
         augmentation: dict[str, Any] | None = None,
         label_strategy: str = "nonzero_to_foreground",
+        positive_probability: float = 0.7,
+        seed: int = 42,
+        cache_max_cases: int = 2,
     ) -> None:
         if not cases:
             raise ValueError("MultimodalPatchDataset requires at least one case")
@@ -180,46 +173,80 @@ class MultimodalPatchDataset(Dataset):
         self.normalization = normalization
         self.augmentation = augmentation
         self.label_strategy = label_strategy
+        self.positive_probability = positive_probability
+        self.seed = int(seed)
+        self.epoch = 0
+        self._cache = _CaseCache(cache_max_cases)
         for case in cases:
             missing = sorted(set(self.modalities) - set(case.modalities))
             if missing:
                 raise ValueError(f"Case {case.case_id} is missing modalities: {missing}")
             validate_multimodal_case(case)
+        if augmentation and augmentation.get("enabled"):
+            raise ValueError(
+                "Random augmentation is not implemented in the deterministic "
+                "multimodal patch pipeline"
+            )
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def _load_case(
+        self, case: MultimodalCase
+    ) -> tuple[dict[str, np.ndarray], np.ndarray]:
+        key = (
+            case.case_id,
+            tuple((name, str(case.modalities[name])) for name in self.modalities),
+            str(case.label),
+            self.normalization,
+            self.crop_or_pad_size,
+            self.label_strategy,
+        )
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        images = {
+            name: preprocess_volume(
+                nib.load(str(case.modalities[name])).get_fdata(dtype=np.float32),
+                self.normalization,
+            )
+            for name in self.modalities
+        }
+        raw_label = nib.load(str(case.label)).get_fdata()
+        if self.label_strategy == "nonzero_to_foreground":
+            label = (raw_label > 0).astype(np.uint8)
+        elif self.label_strategy == "identity":
+            label = np.asarray(raw_label, dtype=np.int64)
+        else:
+            raise ValueError(f"Unknown label strategy: {self.label_strategy}")
+        if self.crop_or_pad_size:
+            images = {
+                name: crop_or_pad_array(array, self.crop_or_pad_size)
+                for name, array in images.items()
+            }
+            label = crop_or_pad_array(label, self.crop_or_pad_size)
+        for array in [*images.values(), label]:
+            array.setflags(write=False)
+        value = (images, label)
+        self._cache.put(key, value)
+        return value
 
     def __len__(self) -> int:
         return len(self.cases) * self.samples_per_volume
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         case = self.cases[index % len(self.cases)]
-        subject = _torchio_subject(
-            case,
-            self.crop_or_pad_size,
-            self.normalization,
-            self.augmentation,
+        images, full_label = self._load_case(case)
+        rng = np.random.default_rng(
+            self.seed + self.epoch * 1_000_003 + int(index)
         )
-        spatial = np.asarray(subject.spatial_shape)
-        patch = np.asarray(self.patch_size)
-        if np.any(spatial < patch):
-            raise ValueError(
-                f"Case {case.case_id} shape {tuple(spatial)} is smaller than patch "
-                f"{self.patch_size}"
-            )
-        starts = [
-            int(torch.randint(0, int(length - size + 1), (1,)).item())
-            for length, size in zip(spatial, patch)
-        ]
-        slices = tuple(slice(start, start + size) for start, size in zip(starts, patch))
-        inputs = {
-            name: subject[name].data[(slice(None), *slices)].float()
-            for name in self.modalities
-        }
-        label = subject["label"].data[(0, *slices)]
-        if self.label_strategy == "nonzero_to_foreground":
-            label = (label > 0).long()
-        elif self.label_strategy == "identity":
-            label = label.long()
-        else:
-            raise ValueError(f"Unknown label strategy: {self.label_strategy}")
+        inputs, label = sample_multimodal_patch(
+            images,
+            full_label,
+            self.patch_size,
+            self.positive_probability,
+            rng,
+        )
         return {
             "inputs": inputs,
             "student_image": inputs[self.student_modality],
@@ -237,19 +264,55 @@ class TopCoWPatchDataset(Dataset):
         patch_size: tuple[int, int, int] = (48, 48, 48),
         positive_probability: float = 0.7,
         samples_per_case: int = 4,
+        normalization: str = "nonzero_zscore",
+        seed: int = 42,
+        cache_max_cases: int = 2,
     ) -> None:
         self.cases = cases
         self.patch_size = patch_size
         self.positive_probability = positive_probability
         self.samples_per_case = samples_per_case
+        self.normalization = normalization
+        self.seed = int(seed)
+        self.epoch = 0
+        self._cache = _CaseCache(cache_max_cases)
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def _load_case(self, case: TopCoWCase) -> tuple[np.ndarray, np.ndarray]:
+        key = (
+            case.case_id,
+            str(case.image),
+            str(case.label),
+            self.normalization,
+        )
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        image, label = load_training_arrays(
+            str(case.image), str(case.label), self.normalization
+        )
+        image.setflags(write=False)
+        label.setflags(write=False)
+        value = (image, label)
+        self._cache.put(key, value)
+        return value
 
     def __len__(self) -> int:
         return len(self.cases) * self.samples_per_case
 
     def __getitem__(self, index: int):
         case = self.cases[index % len(self.cases)]
-        image, label = load_training_arrays(str(case.image), str(case.label))
+        image, label = self._load_case(case)
+        rng = np.random.default_rng(
+            self.seed + self.epoch * 1_000_003 + int(index)
+        )
         image_patch, label_patch = sample_patch(
-            image, binary_label(label), self.patch_size, self.positive_probability
+            image,
+            binary_label(label),
+            self.patch_size,
+            self.positive_probability,
+            rng,
         )
         return {"image": image_patch, "label": label_patch, "case_id": case.case_id}

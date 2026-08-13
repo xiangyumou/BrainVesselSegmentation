@@ -5,53 +5,22 @@ import json
 import os
 from pathlib import Path
 
-import torch
-
 from .checkpoints import (
-    build_lingfeng_from_spec,
     convert_legacy_checkpoint,
-    load_lingfeng_student_checkpoint,
+    load_prediction_checkpoint,
     write_inspection_report,
 )
 from .config import load_config
 from .data.topcow import create_fixed_split, discover_topcow_cases, validate_topcow_dataset
 from .devices import select_device
 from .evaluation import evaluate_directories
-from .inference import predict_nifti
-from .models import LingfengMRAStudent, StandardUNet3D
+from .inference import discover_inference_cases, predict_case
 from .smoke import run_smoke_test
 from .training.trainer import train_from_config
 
 
 def _print(payload) -> None:
     print(json.dumps(payload, indent=2, default=str))
-
-
-def _build_prediction_model(config: dict, checkpoint: str, device: torch.device):
-    name = config["model"]["name"]
-    if name == "standard_unet3d":
-        model = StandardUNet3D(
-            base_channels=int(config["model"].get("base_channels", 32))
-        )
-        payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
-        model.load_state_dict(payload.get("model", payload), strict=True)
-    elif name == "lingfeng_student_transfer":
-        model = LingfengMRAStudent()
-        payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
-        state = payload.get("model_state", payload.get("model", payload))
-        try:
-            model.load_state_dict(state, strict=True)
-        except RuntimeError:
-            load_lingfeng_student_checkpoint(model, checkpoint)
-    elif name == "configurable_lingfeng":
-        payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
-        if payload.get("schema_version") != 1:
-            raise RuntimeError("Convert legacy Lingfeng checkpoints before prediction")
-        model = build_lingfeng_from_spec(payload["model_spec"])
-        model.load_state_dict(payload["model_state"], strict=True)
-    else:
-        raise ValueError(f"Unknown model name: {name}")
-    return model.to(device).eval()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -129,25 +98,34 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "predict":
         config = load_config(args.config)
         policy = select_device(args.device)
-        model = _build_prediction_model(config, args.checkpoint, policy.device)
+        model = load_prediction_checkpoint(
+            config, args.checkpoint, policy.device
+        )
         input_path, output_path = Path(args.input), Path(args.output)
-        files = [input_path] if input_path.is_file() else sorted(input_path.glob("*.nii.gz"))
-        if not files:
-            raise FileNotFoundError(f"No NIfTI files found: {input_path}")
+        branch = str(config["inference"]["branch"])
+        cases = discover_inference_cases(config, input_path, branch)
         outputs = []
-        for source in files:
-            output_name = source.name.replace("_0000.nii.gz", ".nii.gz")
-            destination = output_path if input_path.is_file() else output_path / output_name
+        for case in cases:
+            if input_path.is_file():
+                destination = output_path
+            elif branch == "teacher":
+                destination = output_path / f"{case.case_id}.nii.gz"
+            else:
+                source_name = case.reference.name
+                output_name = source_name.replace("_0000.nii.gz", ".nii.gz")
+                destination = output_path / output_name
             outputs.append(
                 str(
-                    predict_nifti(
+                    predict_case(
                         model,
-                        source,
+                        case,
                         destination,
                         policy.device,
-                        tuple(config["inference"].get("window_size", [48] * 3)),
-                        tuple(config["inference"].get("overlap", [24] * 3)),
-                        str(config["inference"].get("branch", "student")),
+                        str(config["data"]["normalization"]),
+                        tuple(config["inference"]["window_size"]),
+                        tuple(config["inference"]["overlap"]),
+                        branch,
+                        str(config["inference"]["compatibility_mode"]),
                     )
                 )
             )

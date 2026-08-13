@@ -11,6 +11,7 @@ from bvs.training.losses import (
     TemperatureKLLoss,
 )
 from bvs.training.stages import build_stage
+from bvs.training.trainer import validation_improved
 
 
 def test_single_training_and_validation_step() -> None:
@@ -103,3 +104,58 @@ def test_kd_stage_missing_teacher_fails_loudly(tmp_path) -> None:
     }
     with pytest.raises(FileNotFoundError, match="does not exist"):
         build_stage(config, torch.device("cpu"))
+
+
+def test_validation_selection_uses_dice_cldice_then_loss() -> None:
+    assert validation_improved(
+        {"dice": 0.6, "cldice": 0.2, "loss": 3.0}, 0.5, 0.9, 0.1
+    )
+    assert validation_improved(
+        {"dice": 0.5, "cldice": 0.6, "loss": 3.0}, 0.5, 0.5, 0.1
+    )
+    assert validation_improved(
+        {"dice": 0.5, "cldice": 0.5, "loss": 0.09}, 0.5, 0.5, 0.1
+    )
+    assert not validation_improved(
+        {"dice": 0.49, "cldice": 1.0, "loss": 0.0}, 0.5, 0.5, 0.1
+    )
+
+
+def test_transfer_freeze_encoder_excludes_encoder_gradients(tmp_path) -> None:
+    source = ConfigurableLingfengModel(
+        ["mra"], "mra", {"mra": 1}, 2, base_channels=2
+    )
+    checkpoint = tmp_path / "student.pt"
+    torch.save({"model": source.state_dict()}, checkpoint)
+    config = {
+        "stage": "supervised",
+        "model": {
+            "name": "lingfeng_student_transfer",
+            "modalities": ["mra"],
+            "student_modality": "mra",
+            "in_channels": {"mra": 1},
+            "num_classes": 2,
+            "base_channels": 2,
+            "pretrained_checkpoint": str(checkpoint),
+            "freeze_encoder": True,
+        },
+        "training": {"logits_clip": None},
+        "loss": {
+            "segmentation": {
+                "cross_entropy_weight": 1,
+                "dice_weight": 1,
+                "dice_variant": "foreground",
+            }
+        },
+    }
+    runtime = build_stage(config, torch.device("cpu"))
+    image = torch.randn(1, 1, 16, 16, 16)
+    label = (image[:, 0] > 0).long()
+    loss, _ = runtime.loss(
+        {"inputs": {"mra": image}, "student_image": image, "label": label}
+    )
+    loss.backward()
+    model = runtime.model
+    assert isinstance(model, ConfigurableLingfengModel)
+    assert model.encoders["mra"].e1_c1.conv.weight.grad is None
+    assert model.student_decoder.seg_logit.conv.weight.grad is not None

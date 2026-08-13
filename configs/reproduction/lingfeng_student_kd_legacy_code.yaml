@@ -16,7 +16,6 @@ data:
   adapter: lingfeng_case_directory
   train_root: null
   val_root: null
-  test_root: null
   split_file: null
   modalities:
     mra: {filename: MRA_subtrMeanDivStd.nii.gz}
@@ -26,12 +25,11 @@ data:
   label: {filename: OTMultiClass.nii.gz, strategy: nonzero_to_foreground}
   crop_or_pad_size: [331, 432, 100]
   patch_size: [48, 48, 48]
-  patch_overlap: [4, 4, 4]
-  normalization: torchio_zscore
-  sampler: uniform
+  normalization: precomputed
   samples_per_volume: 30
-  queue_length: 30
   validation_samples_per_volume: 10
+  positive_probability: 0.7
+  cache_max_cases: 2
   num_workers: 0
   augmentation: {enabled: false}
 training:

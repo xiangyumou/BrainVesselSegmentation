@@ -12,7 +12,14 @@ from bvs.data.topcow import (
     discover_topcow_cases,
     validate_case,
 )
-from bvs.data.dataset import MultimodalCase, discover_lingfeng_cases, validate_multimodal_case
+from bvs.data.dataset import (
+    MultimodalCase,
+    TopCoWPatchDataset,
+    discover_lingfeng_cases,
+    validate_multimodal_case,
+)
+from bvs.data.topcow import TopCoWCase
+from bvs.data.transforms import preprocess_volume
 
 
 def _write_case(root: Path, case_id: str, affine: np.ndarray | None = None) -> None:
@@ -93,3 +100,36 @@ def test_multimodal_affine_mismatch_is_reported(tmp_path: Path) -> None:
     nib.save(nib.Nifti1Image(np.ones((8, 8, 8)), np.eye(4)), label)
     with pytest.raises(ValueError, match="affine mismatch"):
         validate_multimodal_case(MultimodalCase("case", paths, label))
+
+
+def test_preprocess_volume_modes() -> None:
+    source = np.asarray([[[0.0, 1.0, 3.0]]], dtype=np.float32)
+    normalized = preprocess_volume(source, "nonzero_zscore")
+    assert normalized[0, 0, 0] == 0
+    assert np.allclose(normalized[normalized != 0], [-1, 1])
+    assert np.array_equal(preprocess_volume(source, "precomputed"), source)
+
+
+def test_patch_sampling_is_deterministic_by_epoch(tmp_path: Path) -> None:
+    _write_case(tmp_path, "001")
+    image_path = tmp_path / "imagesTr/topcow_mr_001_0000.nii.gz"
+    gradient = np.arange(8**3, dtype=np.float32).reshape(8, 8, 8) + 1
+    nib.save(nib.Nifti1Image(gradient, np.eye(4)), image_path)
+    case = TopCoWCase(
+        "001",
+        image_path,
+        tmp_path / "cow_seg_labelsTr/topcow_mr_001.nii.gz",
+    )
+    dataset = TopCoWPatchDataset(
+        [case],
+        patch_size=(4, 4, 4),
+        positive_probability=0.0,
+        samples_per_case=2,
+        seed=17,
+        cache_max_cases=1,
+    )
+    first = dataset[0]["image"].clone()
+    assert np.array_equal(first.numpy(), dataset[0]["image"].numpy())
+    dataset.set_epoch(1)
+    changed = dataset[0]["image"]
+    assert not np.array_equal(first.numpy(), changed.numpy())

@@ -26,7 +26,6 @@ MODEL_KEYS = {
     "modalities",
     "student_modality",
     "in_channels",
-    "out_channels",
     "num_classes",
     "base_channels",
     "pretrained_checkpoint",
@@ -38,21 +37,18 @@ DATA_KEYS = {
     "root",
     "train_root",
     "val_root",
-    "test_root",
     "split_file",
     "modalities",
     "label",
     "crop_or_pad_size",
     "patch_size",
-    "patch_overlap",
     "normalization",
-    "sampler",
     "samples_per_volume",
-    "queue_length",
     "validation_samples_per_volume",
     "augmentation",
     "num_workers",
     "positive_probability",
+    "cache_max_cases",
 }
 TRAINING_KEYS = {
     "epochs",
@@ -138,6 +134,14 @@ def _triple(value: Any, location: str, *, positive: bool = True) -> None:
         raise ValueError(f"{location} must be a three-element list")
     if positive and any(int(item) <= 0 for item in value):
         raise ValueError(f"{location} values must be positive")
+    if not positive and any(int(item) < 0 for item in value):
+        raise ValueError(f"{location} values must be non-negative")
+
+
+def _integer(value: Any, location: str, *, minimum: int = 1) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        qualifier = "non-negative" if minimum == 0 else "positive"
+        raise ValueError(f"{location} must be a {qualifier} integer")
 
 
 def validate_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -198,6 +202,10 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         )
     if "augmentation" in data:
         _unknown(data["augmentation"], {"enabled"}, "data.augmentation")
+        if data["augmentation"].get("enabled") is not False:
+            raise ValueError(
+                "data.augmentation.enabled=true is not supported"
+            )
 
     model_name = model.get("name")
     if model_name not in {
@@ -231,21 +239,68 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             )
         if not data.get("label"):
             raise ValueError("data.label is required")
+    elif model_name == "standard_unet3d":
+        for key in ("in_channels", "num_classes"):
+            if key not in model:
+                raise ValueError(f"model.{key} is required for standard_unet3d")
+        if int(model["in_channels"]) < 1 or int(model["num_classes"]) < 2:
+            raise ValueError(
+                "model.in_channels must be positive and model.num_classes must be >= 2"
+            )
+    if "freeze_encoder" in model:
+        if model_name != "lingfeng_student_transfer":
+            raise ValueError(
+                "model.freeze_encoder is only allowed for lingfeng_student_transfer"
+            )
+        if not isinstance(model["freeze_encoder"], bool):
+            raise ValueError("model.freeze_encoder must be a boolean")
     if data.get("adapter") not in {"lingfeng_case_directory", "topcow"}:
         raise ValueError("data.adapter must be lingfeng_case_directory or topcow")
-    for key in ("patch_size", "patch_overlap", "crop_or_pad_size"):
+    for key in ("patch_size", "crop_or_pad_size"):
         if key in data:
-            _triple(data[key], f"data.{key}", positive=key != "patch_overlap")
-    if "patch_size" in data and "patch_overlap" in data:
-        if any(
-            int(overlap) >= int(size)
-            for overlap, size in zip(data["patch_overlap"], data["patch_size"])
-        ):
-            raise ValueError("data.patch_overlap must be smaller than data.patch_size")
+            _triple(data[key], f"data.{key}")
+    if data.get("normalization") not in {"nonzero_zscore", "precomputed"}:
+        raise ValueError(
+            "data.normalization must be nonzero_zscore or precomputed"
+        )
+    probability = data.get("positive_probability", 0.7)
+    if isinstance(probability, bool) or not isinstance(probability, (int, float)):
+        raise ValueError("data.positive_probability must be in [0, 1]")
+    if not 0 <= float(probability) <= 1:
+        raise ValueError("data.positive_probability must be in [0, 1]")
+    for key in ("samples_per_volume", "validation_samples_per_volume"):
+        if key in data:
+            _integer(data[key], f"data.{key}")
+    _integer(data.get("num_workers", 0), "data.num_workers", minimum=0)
+    _integer(data.get("cache_max_cases", 2), "data.cache_max_cases", minimum=0)
+    for key in ("epochs", "batch_size", "gradient_accumulation"):
+        _integer(training.get(key), f"training.{key}")
+    if training.get("early_stopping_patience") is not None:
+        _integer(
+            training["early_stopping_patience"],
+            "training.early_stopping_patience",
+        )
+    amp = training.get("amp")
+    if amp not in {"auto", "true", "false", True, False}:
+        raise ValueError("training.amp must be auto, true, or false")
+    if inference.get("branch") not in {"student", "teacher"}:
+        raise ValueError("inference.branch must be student or teacher")
+    if inference.get("compatibility_mode") not in {"gaussian", "torchio"}:
+        raise ValueError(
+            "inference.compatibility_mode must be gaussian or torchio"
+        )
     if "window_size" in inference:
         _triple(inference["window_size"], "inference.window_size")
     if "overlap" in inference:
         _triple(inference["overlap"], "inference.overlap", positive=False)
+    if "window_size" in inference and "overlap" in inference:
+        if any(
+            int(overlap) >= int(size)
+            for overlap, size in zip(inference["overlap"], inference["window_size"])
+        ):
+            raise ValueError(
+                "inference.overlap must be smaller than inference.window_size"
+            )
     if config["stage"] == "student_kd":
         if not model.get("teacher_checkpoint"):
             raise ValueError("student_kd requires model.teacher_checkpoint")
@@ -262,12 +317,23 @@ def load_config(path: str | Path) -> dict[str, Any]:
     if not isinstance(supplied, dict):
         raise TypeError(f"Configuration must be a mapping: {config_path}")
     config = _merge(DEFAULTS, supplied)
+    config.setdefault("data", {})
+    config["data"].setdefault("positive_probability", 0.7)
+    config["data"].setdefault("cache_max_cases", 2)
+    config["data"].setdefault("num_workers", 0)
     config["_config_path"] = str(config_path)
     return validate_config(config)
 
 
 def model_spec_from_config(config: dict[str, Any]) -> dict[str, Any]:
     model = config["model"]
+    if model["name"] == "standard_unet3d":
+        return {
+            "name": "standard_unet3d",
+            "in_channels": int(model["in_channels"]),
+            "num_classes": int(model["num_classes"]),
+            "base_channels": int(model.get("base_channels", 32)),
+        }
     if model["name"] == "lingfeng_student_transfer":
         name = "configurable_lingfeng"
     else:

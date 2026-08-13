@@ -26,6 +26,11 @@ def run_smoke_test(
     seed_everything(42)
     policy = select_device(requested_device)
     checkpoint_path = Path(checkpoint).resolve()
+    normalization = "nonzero_zscore"
+    config = None
+    if config_path is not None:
+        config = load_config(config_path)
+        normalization = str(config["data"]["normalization"])
     equivalence = verify_lingfeng_equivalence(checkpoint_path, policy.device, patch_size=16)
     model = LingfengMRAStudent().to(policy.device)
     from .checkpoints import load_lingfeng_student_checkpoint
@@ -59,7 +64,9 @@ def run_smoke_test(
         labels.append(str(label_path))
         outputs.append(str(output_path))
 
-    train_image, train_label = load_training_arrays(inputs[0], labels[0])
+    train_image, train_label = load_training_arrays(
+        inputs[0], labels[0], normalization
+    )
     image_patch, label_patch = sample_patch(
         train_image,
         train_label,
@@ -78,8 +85,7 @@ def run_smoke_test(
     optimizer.step()
 
     kd_report = None
-    if config_path is not None:
-        config = load_config(config_path)
+    if config is not None:
         spec = model_spec_from_config(config)
         compact = dict(spec)
         compact["base_channels"] = min(int(spec["base_channels"]), 4)
@@ -144,7 +150,9 @@ def run_smoke_test(
             "student_kd_loss": float(combined.detach().cpu()),
         }
 
-    validation_image, validation_label_array = load_training_arrays(inputs[1], labels[1])
+    validation_image, validation_label_array = load_training_arrays(
+        inputs[1], labels[1], normalization
+    )
     validation_tensor = (
         torch.from_numpy(validation_image).unsqueeze(0).unsqueeze(0).to(policy.device)
     )
@@ -163,6 +171,7 @@ def run_smoke_test(
             policy.device,
             window_size=(16, 16, 16),
             overlap=(8, 8, 8),
+            normalization=normalization,
         )
         predicted = nib.load(output_name)
         if predicted.shape != volume.shape or not np.allclose(predicted.affine, affine):

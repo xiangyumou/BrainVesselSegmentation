@@ -14,19 +14,16 @@ data:
   root: null
   train_root: null
   val_root: null
-  test_root: null
   split_file: configs/splits/topcow_binary_seed42.json
   modalities: {}
   label: {}
   crop_or_pad_size: [331, 432, 100]
   patch_size: [48, 48, 48]
-  patch_overlap: [24, 24, 24]
-  normalization: torchio_zscore
-  sampler: uniform
+  normalization: nonzero_zscore
   samples_per_volume: 4
-  queue_length: 30
   validation_samples_per_volume: 1
   positive_probability: 0.7
+  cache_max_cases: 2
   num_workers: 0
   augmentation:
     enabled: false

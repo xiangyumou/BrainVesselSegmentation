@@ -5,9 +5,15 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 import torch
+import pytest
 
 from bvs.evaluation import segmentation_metrics
-from bvs.inference import predict_nifti, sliding_window_inference
+from bvs.inference import (
+    TEACHER_INPUT_ERROR,
+    discover_inference_cases,
+    predict_nifti,
+    sliding_window_inference,
+)
 from bvs.models import ConfigurableLingfengModel
 
 
@@ -15,6 +21,12 @@ class ForegroundModel(torch.nn.Module):
     def forward(self, image: torch.Tensor):
         logits = torch.cat((-image, image), dim=1)
         return {"logits": logits, "probabilities": torch.softmax(logits, dim=1), "features": image}
+
+
+class ThreeClassModel(torch.nn.Module):
+    def forward(self, image: torch.Tensor):
+        logits = torch.cat((-image, torch.zeros_like(image), image), dim=1)
+        return {"logits": logits, "probabilities": torch.softmax(logits, dim=1)}
 
 
 def test_sliding_window_shape() -> None:
@@ -61,3 +73,39 @@ def test_multimodal_teacher_sliding_window() -> None:
         branch="teacher",
     )
     assert probabilities.shape == (1, 2, 17, 18, 19)
+
+
+def test_sliding_window_supports_dynamic_output_channels() -> None:
+    probabilities = sliding_window_inference(
+        torch.randn(1, 1, 9, 10, 11),
+        ThreeClassModel(),
+        (8, 8, 8),
+        (4, 4, 4),
+    )
+    assert probabilities.shape == (1, 3, 9, 10, 11)
+
+
+def test_torchio_mode_preserves_shape() -> None:
+    pytest.importorskip("torchio")
+    probabilities = sliding_window_inference(
+        torch.randn(1, 1, 9, 10, 11),
+        ForegroundModel(),
+        (8, 8, 8),
+        (4, 4, 4),
+        compatibility_mode="torchio",
+    )
+    assert probabilities.shape == (1, 2, 9, 10, 11)
+
+
+def test_teacher_discovery_rejects_single_file(tmp_path: Path) -> None:
+    source = tmp_path / "source.nii.gz"
+    nib.save(nib.Nifti1Image(np.ones((8, 8, 8)), np.eye(4)), source)
+    config = {
+        "model": {"modalities": ["mra", "cta"]},
+        "data": {
+            "adapter": "lingfeng_case_directory",
+            "modalities": {"mra": "mra.nii.gz", "cta": "cta.nii.gz"},
+        },
+    }
+    with pytest.raises(ValueError, match=TEACHER_INPUT_ERROR):
+        discover_inference_cases(config, source, "teacher")

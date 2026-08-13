@@ -15,6 +15,7 @@ from .models.lingfeng import (
     LingfengLegacyModel,
     LingfengMRAStudent,
 )
+from .models.unet3d import StandardUNet3D
 
 LEGACY_PREFIX_MAP = {
     "input_mra_encoder.": "encoders.mra.",
@@ -82,6 +83,74 @@ def build_lingfeng_from_spec(spec: dict[str, Any]) -> ConfigurableLingfengModel:
         num_classes=int(spec["num_classes"]),
         base_channels=int(spec.get("base_channels", 16)),
     )
+
+
+def build_model_from_spec(spec: dict[str, Any]) -> torch.nn.Module:
+    if spec.get("name") == "standard_unet3d":
+        return StandardUNet3D(
+            in_channels=int(spec["in_channels"]),
+            out_channels=int(spec["num_classes"]),
+            base_channels=int(spec.get("base_channels", 32)),
+        )
+    return build_lingfeng_from_spec(spec)
+
+
+def _require_matching_spec(
+    payload: dict[str, Any], requested_spec: dict[str, Any]
+) -> None:
+    checkpoint_spec = payload.get("model_spec")
+    if checkpoint_spec != requested_spec:
+        raise RuntimeError(
+            "Checkpoint model spec is incompatible: "
+            f"checkpoint={checkpoint_spec}, config={requested_spec}"
+        )
+
+
+def load_prediction_checkpoint(
+    config: dict[str, Any],
+    checkpoint: str | Path,
+    device: torch.device | str,
+) -> torch.nn.Module:
+    """Build and load the configured prediction model.
+
+    Unified checkpoints are checked against the exact configured model spec.
+    Historical state dictionaries remain supported only for model families
+    whose architecture can be reconstructed from the configuration.
+    """
+
+    checkpoint_path = project_path(config, checkpoint)
+    state, payload = _load_checkpoint(checkpoint_path)
+    requested_spec = model_spec_from_config(config)
+    name = config["model"]["name"]
+
+    if name == "configurable_lingfeng":
+        if (
+            payload.get("schema_version") != 1
+            or "model_spec" not in payload
+            or "model_state" not in payload
+        ):
+            raise RuntimeError(
+                "configurable_lingfeng prediction requires a schema_version 1 "
+                "checkpoint containing model_spec and model_state"
+            )
+        _require_matching_spec(payload, requested_spec)
+        model = build_lingfeng_from_spec(requested_spec)
+        model.load_state_dict(state, strict=True)
+    elif name == "standard_unet3d":
+        if payload.get("schema_version") == 1 and "model_spec" in payload:
+            _require_matching_spec(payload, requested_spec)
+        model = build_model_from_spec(requested_spec)
+        model.load_state_dict(state, strict=True)
+    elif name == "lingfeng_student_transfer":
+        model = build_lingfeng_from_spec(requested_spec)
+        if payload.get("schema_version") == 1 and "model_spec" in payload:
+            _require_matching_spec(payload, requested_spec)
+            model.load_state_dict(state, strict=True)
+        else:
+            load_lingfeng_student_checkpoint(model, checkpoint_path)
+    else:
+        raise ValueError(f"Unknown model name: {name}")
+    return model.to(device).eval()
 
 
 def load_unified_checkpoint(
@@ -208,6 +277,9 @@ def make_unified_checkpoint(
     epoch: int = 0,
     best_validation_loss: float = float("inf"),
     best_validation_dice: float | None = None,
+    best_validation_cldice: float | None = None,
+    best_epoch: int | None = None,
+    stale_epochs: int = 0,
     student_projection: torch.nn.Module | None = None,
     teacher_projection: torch.nn.Module | None = None,
     optimizer: torch.optim.Optimizer | None = None,
@@ -229,8 +301,16 @@ def make_unified_checkpoint(
         "optimizer_state": optimizer.state_dict() if optimizer is not None else None,
         "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
         "epoch": int(epoch),
-        "best_validation_loss": float(best_validation_loss),
+        "best_validation_loss": (
+            float(best_validation_loss)
+            if best_validation_loss is not None
+            else None
+        ),
         "best_validation_dice": best_validation_dice,
+        "best_validation_cldice": best_validation_cldice,
+        "best_epoch": best_epoch,
+        "stale_epochs": int(stale_epochs),
+        "selection_metric": "mean_dice",
         "resolved_config": resolved_config,
         "random_state": {
             "python": random.getstate(),
@@ -434,6 +514,10 @@ def write_inspection_report(
             "epoch": payload.get("epoch"),
             "best_validation_loss": payload.get("best_validation_loss"),
             "best_validation_dice": payload.get("best_validation_dice"),
+            "best_validation_cldice": payload.get("best_validation_cldice"),
+            "best_epoch": payload.get("best_epoch"),
+            "stale_epochs": payload.get("stale_epochs", 0),
+            "selection_metric": payload.get("selection_metric"),
             "source": payload.get("source"),
             "conversion_report": payload.get("conversion_report"),
         }

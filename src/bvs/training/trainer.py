@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import nibabel as nib
 import torch
 import yaml
 from torch.utils.data import DataLoader
@@ -21,6 +22,8 @@ from ..config import model_spec_from_config, project_path, resolve_data_root
 from ..data.dataset import MultimodalPatchDataset, TopCoWPatchDataset, discover_cases
 from ..data.topcow import cases_by_id, discover_topcow_cases
 from ..devices import seed_everything, select_device
+from ..evaluation import segmentation_metrics
+from ..inference import InferenceCase, load_inference_case, sliding_window_inference
 from .stages import StageRuntime, build_stage
 
 
@@ -36,9 +39,7 @@ def _load_split(config: dict[str, Any]) -> dict[str, list[str]]:
     return json.loads(project_path(config, split_value).read_text(encoding="utf-8"))
 
 
-def _multimodal_dataset(
-    config: dict[str, Any], split_name: str
-) -> MultimodalPatchDataset:
+def _multimodal_cases(config: dict[str, Any], split_name: str) -> list[Any]:
     data = config["data"]
     root = resolve_data_root(config, split_name)
     cases = discover_cases(
@@ -53,6 +54,14 @@ def _multimodal_dataset(
         if missing:
             raise ValueError(f"Split references missing cases: {missing}")
         cases = [indexed[case_id] for case_id in requested]
+    return cases
+
+
+def _multimodal_dataset(
+    config: dict[str, Any], split_name: str
+) -> MultimodalPatchDataset:
+    data = config["data"]
+    cases = _multimodal_cases(config, split_name)
     label_spec = data["label"]
     strategy = (
         label_spec.get("strategy", "nonzero_to_foreground")
@@ -74,10 +83,19 @@ def _multimodal_dataset(
         normalization=data["normalization"],
         augmentation=data["augmentation"] if split_name == "train" else {"enabled": False},
         label_strategy=strategy,
+        positive_probability=float(data["positive_probability"]),
+        seed=int(config["seed"]),
+        cache_max_cases=int(data["cache_max_cases"]),
     )
 
 
-def _loaders(config: dict[str, Any]) -> tuple[DataLoader, DataLoader]:
+def _seed_worker(worker_id: int) -> None:
+    worker_seed = torch.initial_seed() % 2**32
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+
+
+def _loaders(config: dict[str, Any]) -> tuple[DataLoader, list[Any]]:
     data = config["data"]
     batch_size = int(config["training"]["batch_size"])
     workers = int(data.get("num_workers", 0))
@@ -93,23 +111,25 @@ def _loaders(config: dict[str, Any]) -> tuple[DataLoader, DataLoader]:
             tuple(data["patch_size"]),
             float(data.get("positive_probability", 0.7)),
             int(data["samples_per_volume"]),
+            str(data["normalization"]),
+            int(config["seed"]),
+            int(data["cache_max_cases"]),
         )
-        val_dataset = TopCoWPatchDataset(
-            [indexed[case_id] for case_id in split["val"]],
-            tuple(data["patch_size"]),
-            1.0,
-            int(data["validation_samples_per_volume"]),
-        )
+        val_cases = [indexed[case_id] for case_id in split["val"]]
     else:
         train_dataset = _multimodal_dataset(config, "train")
-        val_dataset = _multimodal_dataset(config, "val")
+        val_cases = _multimodal_cases(config, "val")
+    generator = torch.Generator().manual_seed(int(config["seed"]))
     return (
         DataLoader(
-            train_dataset, batch_size=batch_size, shuffle=True, num_workers=workers
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=workers,
+            generator=generator,
+            worker_init_fn=_seed_worker,
         ),
-        DataLoader(
-            val_dataset, batch_size=batch_size, shuffle=False, num_workers=workers
-        ),
+        val_cases,
     )
 
 
@@ -184,15 +204,161 @@ def _restore_random_state(state: dict[str, Any] | None) -> None:
         torch.cuda.set_rng_state_all(state["cuda"])
 
 
+def _validation_case(
+    case: Any, config: dict[str, Any]
+) -> tuple[InferenceCase, Path]:
+    if config["model"]["name"] == "standard_unet3d":
+        return (
+            InferenceCase(case.case_id, {"image": case.image}, case.image),
+            case.label,
+        )
+    return (
+        InferenceCase(case.case_id, dict(case.modalities), next(iter(case.modalities.values()))),
+        case.label,
+    )
+
+
+def _validation_loss_from_probabilities(
+    probabilities: torch.Tensor,
+    label: torch.Tensor,
+    config: dict[str, Any],
+) -> torch.Tensor:
+    settings = config["loss"]["segmentation"]
+    ce = torch.nn.functional.nll_loss(
+        probabilities.clamp_min(1e-7).log(), label.long()
+    )
+    variant = str(settings["dice_variant"])
+    smooth = 1e-5
+    if variant in {"foreground", "foreground_linear"}:
+        score = probabilities[:, 1]
+        truth = (label == 1).to(score.dtype)
+        dimensions = tuple(range(1, score.ndim))
+        intersection = torch.sum(score * truth, dim=dimensions)
+        denominator = torch.sum(score, dim=dimensions) + torch.sum(
+            truth, dim=dimensions
+        )
+        dice = 1.0 - torch.mean(
+            (2.0 * intersection + smooth) / (denominator + smooth)
+        )
+    elif variant == "legacy_multiclass_squared":
+        one_hot = torch.nn.functional.one_hot(
+            label.long(), num_classes=probabilities.shape[1]
+        ).movedim(-1, 1).to(probabilities.dtype)
+        dice = probabilities.new_zeros(())
+        for index in range(probabilities.shape[1]):
+            score = probabilities[:, index]
+            truth = one_hot[:, index]
+            intersection = torch.sum(score * truth)
+            denominator = torch.sum(score.square()) + torch.sum(truth.square())
+            dice = dice + 1.0 - (
+                2.0 * intersection + smooth
+            ) / (denominator + smooth)
+        dice = dice / probabilities.shape[1]
+    else:
+        raise ValueError(f"Unknown dice variant: {variant}")
+    return (
+        float(settings["cross_entropy_weight"]) * ce
+        + float(settings["dice_weight"]) * dice
+    )
+
+
+@torch.inference_mode()
+def validate_full_volumes(
+    runtime: StageRuntime,
+    cases: list[Any],
+    config: dict[str, Any],
+    device: torch.device,
+) -> dict[str, float]:
+    if not cases:
+        raise RuntimeError("Validation set contains no cases")
+    was_training = runtime.model.training
+    runtime.train(False)
+    branch = "teacher" if config["stage"] == "teacher" else "student"
+    metric_rows: list[dict[str, float]] = []
+    losses: list[float] = []
+    try:
+        for raw_case in cases:
+            case, label_path = _validation_case(raw_case, config)
+            tensors, _ = load_inference_case(
+                case, str(config["data"]["normalization"])
+            )
+            inference_input: torch.Tensor | dict[str, torch.Tensor] = (
+                tensors
+                if branch == "teacher"
+                else tensors[
+                    str(config["model"].get("student_modality", "image"))
+                ]
+            )
+            probabilities = sliding_window_inference(
+                inference_input,
+                runtime.model,
+                tuple(config["inference"]["window_size"]),
+                tuple(config["inference"]["overlap"]),
+                device,
+                branch,
+                str(config["inference"]["compatibility_mode"]),
+            ).to(device)
+            label = (
+                torch.from_numpy(
+                    (nib.load(str(label_path)).get_fdata() > 0).astype(np.int64)
+                )
+                .unsqueeze(0)
+                .to(device)
+            )
+            loss = _validation_loss_from_probabilities(
+                probabilities, label, config
+            )
+            losses.append(float(loss.cpu()))
+            prediction = torch.argmax(probabilities, dim=1).squeeze(0).cpu().numpy()
+            metric_rows.append(
+                segmentation_metrics(
+                    prediction, label.squeeze(0).cpu().numpy()
+                )
+            )
+    finally:
+        runtime.train(was_training)
+    return {
+        "loss": float(np.mean(losses)),
+        **{
+            name: float(np.mean([row[name] for row in metric_rows]))
+            for name in ("dice", "iou", "precision", "recall", "cldice")
+        },
+    }
+
+
+def validation_improved(
+    metrics: dict[str, float],
+    best_dice: float | None,
+    best_cldice: float | None,
+    best_loss: float | None,
+    tolerance: float = 1e-6,
+) -> bool:
+    if best_dice is None:
+        return True
+    dice_delta = metrics["dice"] - best_dice
+    if dice_delta > tolerance:
+        return True
+    if abs(dice_delta) > tolerance:
+        return False
+    if best_cldice is None:
+        return True
+    cldice_delta = metrics["cldice"] - best_cldice
+    if cldice_delta > tolerance:
+        return True
+    if abs(cldice_delta) > tolerance:
+        return False
+    return best_loss is None or metrics["loss"] < best_loss - tolerance
+
+
 def _resume(
     runtime: StageRuntime,
     optimizer: torch.optim.Optimizer,
     scheduler: Any,
     config: dict[str, Any],
-) -> tuple[int, float, float | None]:
+) -> tuple[int, float | None, float | None, float | None, int | None, int]:
     value = config["training"].get("resume_checkpoint")
     if not value:
-        return 0, float("inf"), None
+        return 0, None, None, None, None, 0
     path = project_path(config, value)
     payload = torch.load(path, map_location="cpu", weights_only=False)
     if payload.get("schema_version") != 1:
@@ -213,15 +379,22 @@ def _resume(
     _restore_random_state(payload.get("random_state"))
     return (
         int(payload["epoch"]),
-        float(payload["best_validation_loss"]),
+        (
+            float(payload["best_validation_loss"])
+            if payload.get("best_validation_loss") is not None
+            else None
+        ),
         payload.get("best_validation_dice"),
+        payload.get("best_validation_cldice"),
+        payload.get("best_epoch"),
+        int(payload.get("stale_epochs", 0)),
     )
 
 
 def train_from_config(config: dict[str, Any]) -> Path:
     seed_everything(int(config["seed"]))
     policy = select_device(str(config["device"]))
-    train_loader, val_loader = _loaders(config)
+    train_loader, val_cases = _loaders(config)
     runtime = build_stage(config, policy.device)
     training = config["training"]
     if training["optimizer"] != "adam":
@@ -239,7 +412,7 @@ def train_from_config(config: dict[str, Any]) -> Path:
         step_size=int(scheduler_config["step_size"]),
         gamma=float(scheduler_config["gamma"]),
     )
-    start_epoch, best_loss, best_dice = _resume(
+    start_epoch, best_loss, best_dice, best_cldice, best_epoch, stale_epochs = _resume(
         runtime, optimizer, scheduler, config
     )
 
@@ -273,63 +446,76 @@ def train_from_config(config: dict[str, Any]) -> Path:
     writer = SummaryWriter(str(run_dir / "tensorboard"))
     history_path = metrics_dir / "history.csv"
     history: list[dict[str, float | int]] = []
-    stale_epochs = 0
     max_epochs = int(training["epochs"])
     accumulation = int(training["gradient_accumulation"])
     gradient_clip = training["gradient_clip_norm"]
     gradient_clip = float(gradient_clip) if gradient_clip is not None else None
 
     for epoch in range(start_epoch + 1, max_epochs + 1):
+        if hasattr(train_loader.dataset, "set_epoch"):
+            train_loader.dataset.set_epoch(epoch)
+        if train_loader.generator is not None:
+            train_loader.generator.manual_seed(int(config["seed"]) + epoch)
         train_metrics = _run_epoch(
             runtime,
             train_loader,
             policy.device,
             optimizer,
             accumulation,
-            policy.amp_enabled and training["amp"] != False,
+            policy.amp_enabled
+            and str(training["amp"]).lower() not in {"false", "0"},
             gradient_clip,
         )
-        val_metrics = _run_epoch(
-            runtime, val_loader, policy.device, None, accumulation, False, None
+        val_metrics = validate_full_volumes(
+            runtime, val_cases, config, policy.device
         )
         scheduler.step()
         row: dict[str, float | int] = {
             "epoch": epoch,
             "train_loss": train_metrics["loss"],
+            "train_segmentation": train_metrics["segmentation"],
             "val_loss": val_metrics["loss"],
+            "val_dice": val_metrics["dice"],
+            "val_iou": val_metrics["iou"],
+            "val_precision": val_metrics["precision"],
+            "val_recall": val_metrics["recall"],
+            "val_cldice": val_metrics["cldice"],
             "learning_rate": optimizer.param_groups[0]["lr"],
         }
-        for prefix, metrics in (("train", train_metrics), ("val", val_metrics)):
-            for name, value in metrics.items():
-                if name != "loss":
-                    row[f"{prefix}_{name}"] = value
+        if config["stage"] == "student_kd":
+            row["train_logit_distillation"] = train_metrics[
+                "logit_distillation"
+            ]
+            row["train_feature_distillation"] = train_metrics[
+                "feature_distillation"
+            ]
+        improved = validation_improved(
+            val_metrics, best_dice, best_cldice, best_loss
+        )
+        row["is_best"] = int(improved)
         history.append(row)
         for name, value in row.items():
             if name != "epoch":
                 writer.add_scalar(name.replace("_", "/", 1), value, epoch)
-        improved = val_metrics["loss"] < best_loss
         if improved:
             best_loss = val_metrics["loss"]
+            best_dice = val_metrics["dice"]
+            best_cldice = val_metrics["cldice"]
+            best_epoch = epoch
             stale_epochs = 0
         else:
             stale_epochs += 1
         state = make_unified_checkpoint(
             stage=config["stage"],
             model=runtime.model,
-            model_spec=(
-                model_spec_from_config(config)
-                if config["model"]["name"] != "standard_unet3d"
-                else {
-                    "name": "standard_unet3d",
-                    "in_channels": int(config["model"].get("in_channels", 1)),
-                    "num_classes": int(config["model"].get("num_classes", 2)),
-                    "base_channels": int(config["model"].get("base_channels", 32)),
-                }
-            ),
+            model_spec=model_spec_from_config(config),
             resolved_config=clean_config,
             epoch=epoch,
             best_validation_loss=best_loss,
             best_validation_dice=best_dice,
+            best_validation_cldice=best_cldice,
+            best_epoch=best_epoch,
+            stale_epochs=stale_epochs,
             student_projection=runtime.student_projection,
             teacher_projection=runtime.teacher_projection,
             optimizer=optimizer,
@@ -353,6 +539,10 @@ def train_from_config(config: dict[str, Any]) -> Path:
         "epochs_completed": len(history),
         "last_epoch": history[-1]["epoch"] if history else start_epoch,
         "best_validation_loss": best_loss,
+        "best_validation_dice": best_dice,
+        "best_validation_cldice": best_cldice,
+        "best_epoch": best_epoch,
+        "selection_metric": "mean_dice",
         "best_checkpoint": str(checkpoint_dir / "best.pt"),
     }
     (metrics_dir / "summary.json").write_text(

@@ -25,12 +25,21 @@ package.
 
 Python 3.11 is required. Docker is not used.
 
+Verify the interpreter and installed environment before running experiments:
+
+```bash
+python --version
+python -m pip check
+python -c "import torch, torchio, nibabel; print(torch.__version__, torchio.__version__, nibabel.__version__)"
+python -m pip install -e ".[test]"
+```
+
 macOS (Apple Silicon, MPS):
 
 ```bash
 conda env create -f environment.yml
 conda activate bvs
-pip install -e .
+pip install -e ".[test]"
 bvs smoke-test --device mps
 ```
 
@@ -39,8 +48,8 @@ Windows or Linux with an NVIDIA driver compatible with CUDA 12.1:
 ```bash
 conda create -n bvs python=3.11 -y
 conda activate bvs
-pip install torch==2.4.0 torchvision==0.19.0 --index-url https://download.pytorch.org/whl/cu121
-pip install -e .
+pip install torch==2.4.0 --index-url https://download.pytorch.org/whl/cu121
+pip install -e ".[test]"
 bvs smoke-test --device cuda
 ```
 
@@ -76,6 +85,12 @@ test cases.
 MRA is Z-score normalized over non-zero voxels while background stays zero. Training samples
 `48³` patches with a 0.7 probability of centering on vessel foreground. Labels use
 `label > 0`, including the non-contiguous class value 15.
+
+The three Lingfeng legacy reproduction profiles use `precomputed` normalization because
+their configured filenames already contain mean/std-normalized volumes. `CropOrPad` applies
+only before training patch sampling; whole-volume validation and prediction retain original
+shape, affine, and header. Each Dataset worker keeps an independent LRU of two preprocessed
+cases by default (`data.cache_max_cases: 2`; use `0` to disable).
 
 The download helper enforces at least 40 GB of free disk space before transfer:
 
@@ -119,10 +134,17 @@ bvs train --config configs/train/unet3d_topcow_binary.yaml
 bvs train --config configs/train/lingfeng_transfer_topcow_binary.yaml
 ```
 
-Both configurations use Adam, learning rate 0.001, weight decay `1e-5`, StepLR
-(`step_size=10`, `gamma=0.8`), CE + foreground Dice loss, batch size 1, gradient
-accumulation 4, up to 200 epochs, and early stopping after 20 validation epochs without
-improvement. The transfer model fine-tunes every loaded layer.
+Both configurations use Adam, StepLR, CE + Dice loss, deterministic label-aware patch
+sampling, and whole-volume sliding-window validation after every epoch. The transfer profile
+supports `model.freeze_encoder: true`; when enabled, only the student decoder and metric head
+are optimized.
+
+`best.pt` and early stopping use a deterministic lexicographic rule: mean validation Dice,
+then mean clDice when Dice differs by at most `1e-6`, then validation loss when both metrics
+are tied. `history.csv` contains training loss components, whole-volume Dice/IoU/precision/
+recall/clDice, learning rate, and `is_best`. Checkpoints and `summary.json` record the best
+epoch, loss, Dice, clDice, and `selection_metric: mean_dice`. Resuming restores those values
+and the consecutive stale-epoch count.
 
 Each run writes:
 
@@ -136,8 +158,10 @@ runs/{experiment_name}/{timestamp}/
 
 ## Prediction and evaluation
 
-Prediction uses a `48³` sliding window, `24³` overlap, Gaussian blending, and writes the
-original NIfTI shape, affine, and copied header:
+Prediction uses the configured sliding window and writes the original NIfTI shape, affine,
+and copied header. `compatibility_mode: gaussian` uses Gaussian blending;
+`compatibility_mode: torchio` uses TorchIO `GridSampler`/`GridAggregator` with average
+overlap. Every overlap value must satisfy `0 <= overlap < window_size`.
 
 ```bash
 bvs predict --config configs/train/unet3d_topcow_binary.yaml \
@@ -146,6 +170,24 @@ bvs predict --config configs/train/unet3d_topcow_binary.yaml \
 
 bvs evaluate --predictions predictions/internal \
   --labels /path/to/labels --output reports/internal
+```
+
+Student prediction accepts one NIfTI or a flat directory of NIfTI files. Teacher prediction
+requires either a Lingfeng case directory containing every configured modality, a root whose
+direct child directories are complete cases, or a TopCoW dataset root:
+
+```bash
+bvs predict \
+  --config configs/reproduction/lingfeng_teacher_legacy_code.yaml \
+  --checkpoint runs/.../checkpoints/best.pt \
+  --input /path/to/case_directories \
+  --output predictions/teacher
+
+bvs predict \
+  --config configs/experiments/topcow_mra_cta_teacher.yaml \
+  --checkpoint runs/.../checkpoints/best.pt \
+  --input "$BVS_DATA_ROOT" \
+  --output predictions/topcow_teacher
 ```
 
 Run evaluation separately for internal test, IXI, and Lausanne. Reports include per-case
@@ -157,7 +199,8 @@ deviation, and bootstrap 95% confidence interval.
 ```bash
 python -m compileall src tests
 pytest -q
-bvs smoke-test --device auto
+bvs smoke-test --device cpu \
+  --config configs/reproduction/lingfeng_student_kd_legacy_code.yaml
 ```
 
 Tests that require the real Lingfeng checkpoint are skipped when the weight is not installed.
@@ -207,7 +250,8 @@ bvs train --config configs/train/unet3d_topcow_binary.yaml
 ```
 
 Set `data.train_root` and `data.val_root` for separate Lingfeng case-directory
-splits. For TopCoW, set `data.root` or `BVS_DATA_ROOT`. A KD run requires a
+splits. For TopCoW, set `data.root` or `BVS_DATA_ROOT`. Full training cannot start until one
+of those roots is configured. A KD run requires a
 unified teacher checkpoint and fails if it is missing or incompatible.
 
 Each run writes the resolved YAML, environment metadata, best/latest unified
@@ -229,6 +273,11 @@ bvs smoke-test \
 ```
 
 The student inference view accesses only the configured student modality.
+
+Valid high-level configuration fields are `model`, `data`, `training`, `loss`, and
+`inference`; unknown fields fail during loading. Removed no-op fields include
+`data.sampler`, `data.queue_length`, `data.patch_overlap`, `data.test_root`, and
+`model.out_channels`.
 
 The unified implementation preserves the four independent modality encoders, sigmoid modality
 attention, per-scale fusion, separate teacher/student decoder and metric layers, legacy Dice

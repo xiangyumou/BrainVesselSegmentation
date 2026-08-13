@@ -9,10 +9,12 @@ from bvs.checkpoints import (
     build_lingfeng_from_spec,
     convert_legacy_checkpoint,
     load_lingfeng_student_checkpoint,
+    load_prediction_checkpoint,
     verify_lingfeng_equivalence,
 )
 from bvs.config import load_config
 from bvs.models import LingfengLegacyModel, LingfengMRAStudent
+from bvs.models import StandardUNet3D
 
 CHECKPOINT = (
     Path(__file__).resolve().parents[1]
@@ -76,3 +78,61 @@ def test_conversion_rejects_wrong_shape_without_writing_output(tmp_path: Path) -
     with pytest.raises(ValueError, match="Shape mismatch"):
         convert_legacy_checkpoint(checkpoint, config, output)
     assert not output.exists()
+
+
+@pytest.mark.parametrize("wrapper", ["model_state", "model", "bare"])
+def test_standard_prediction_checkpoint_formats(
+    tmp_path: Path, wrapper: str
+) -> None:
+    config = load_config(
+        Path(__file__).resolve().parents[1]
+        / "configs/train/unet3d_topcow_binary.yaml"
+    )
+    config["model"]["base_channels"] = 2
+    model = StandardUNet3D(base_channels=2)
+    state = model.state_dict()
+    if wrapper == "model_state":
+        payload = {
+            "schema_version": 1,
+            "model_spec": {
+                "name": "standard_unet3d",
+                "in_channels": 1,
+                "num_classes": 2,
+                "base_channels": 2,
+            },
+            "model_state": state,
+        }
+    elif wrapper == "model":
+        payload = {"model": state}
+    else:
+        payload = state
+    checkpoint = tmp_path / f"{wrapper}.pt"
+    torch.save(payload, checkpoint)
+    loaded = load_prediction_checkpoint(config, checkpoint, "cpu")
+    assert isinstance(loaded, StandardUNet3D)
+
+
+def test_prediction_checkpoint_spec_mismatch_is_explicit(tmp_path: Path) -> None:
+    config = load_config(
+        Path(__file__).resolve().parents[1]
+        / "configs/train/unet3d_topcow_binary.yaml"
+    )
+    config["model"]["base_channels"] = 2
+    checkpoint = tmp_path / "bad_spec.pt"
+    torch.save(
+        {
+            "schema_version": 1,
+            "model_spec": {
+                "name": "standard_unet3d",
+                "in_channels": 1,
+                "num_classes": 3,
+                "base_channels": 2,
+            },
+            "model_state": StandardUNet3D(
+                out_channels=3, base_channels=2
+            ).state_dict(),
+        },
+        checkpoint,
+    )
+    with pytest.raises(RuntimeError, match="checkpoint=.*config="):
+        load_prediction_checkpoint(config, checkpoint, "cpu")

@@ -83,11 +83,7 @@ class StageRuntime:
 
 def _segmentation_loss(config: dict[str, Any]) -> CombinedSegmentationLoss:
     settings = config["loss"]["segmentation"]
-    num_classes = int(
-        config["model"].get(
-            "num_classes", config["model"].get("out_channels", 2)
-        )
-    )
+    num_classes = int(config["model"]["num_classes"])
     return CombinedSegmentationLoss(
         ce_weight=float(settings["cross_entropy_weight"]),
         dice_weight=float(settings["dice_weight"]),
@@ -146,7 +142,7 @@ def build_stage(config: dict[str, Any], device: torch.device) -> StageRuntime:
             raise ValueError("standard_unet3d only supports supervised stage")
         model = StandardUNet3D(
             in_channels=int(model_config.get("in_channels", 1)),
-            out_channels=int(model_config.get("num_classes", model_config.get("out_channels", 2))),
+            out_channels=int(model_config["num_classes"]),
             base_channels=int(model_config.get("base_channels", 32)),
         ).to(device)
         return StageRuntime(stage, model, segmentation, list(model.parameters()))
@@ -159,6 +155,9 @@ def build_stage(config: dict[str, Any], device: torch.device) -> StageRuntime:
         from ..checkpoints import load_lingfeng_student_checkpoint
 
         load_lingfeng_student_checkpoint(model, project_path(config, checkpoint_value))
+        if model_config.get("freeze_encoder", False):
+            for parameter in model.encoders[model.student_modality].parameters():
+                parameter.requires_grad = False
     if stage == "teacher":
         parameters = [
             *model.encoders.parameters(),
@@ -206,6 +205,10 @@ def build_stage(config: dict[str, Any], device: torch.device) -> StageRuntime:
             feature_weight=float(feature["weight"]),
         )
     if stage == "supervised":
-        parameters = _student_parameters(model)
+        parameters = [
+            parameter
+            for parameter in _student_parameters(model)
+            if parameter.requires_grad
+        ]
         return StageRuntime(stage, model, segmentation, parameters)
     raise ValueError(f"Unknown stage: {stage}")

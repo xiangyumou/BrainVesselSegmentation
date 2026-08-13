@@ -17,7 +17,6 @@ data:
   root: null
   train_root: null
   val_root: null
-  test_root: null
   split_file: configs/splits/topcow_binary_seed42.json
   modalities:
     mra: {directory: imagesTr, pattern: "topcow_mr_{case_id}_0000.nii.gz"}
@@ -25,12 +24,11 @@ data:
   label: {directory: cow_seg_labelsTr, pattern: "topcow_mr_{case_id}.nii.gz", strategy: nonzero_to_foreground}
   crop_or_pad_size: [331, 432, 100]
   patch_size: [48, 48, 48]
-  patch_overlap: [4, 4, 4]
-  normalization: torchio_zscore
-  sampler: uniform
+  normalization: nonzero_zscore
   samples_per_volume: 30
-  queue_length: 30
   validation_samples_per_volume: 10
+  positive_probability: 0.7
+  cache_max_cases: 2
   num_workers: 0
   augmentation: {enabled: false}
 training:
