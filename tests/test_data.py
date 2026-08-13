@@ -12,6 +12,7 @@ from bvs.data.topcow import (
     discover_topcow_cases,
     validate_case,
 )
+from bvs.data.dataset import MultimodalCase, discover_lingfeng_cases, validate_multimodal_case
 
 
 def _write_case(root: Path, case_id: str, affine: np.ndarray | None = None) -> None:
@@ -67,3 +68,28 @@ def test_affine_mismatch_is_reported(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="affine mismatch"):
         validate_case(case)
 
+
+def test_lingfeng_case_discovery_rejects_missing_teacher_modality(tmp_path: Path) -> None:
+    case = tmp_path / "case001"
+    case.mkdir()
+    affine = np.eye(4)
+    for filename in ("mra.nii.gz", "cta.nii.gz", "label.nii.gz"):
+        nib.save(nib.Nifti1Image(np.ones((8, 8, 8)), affine), case / filename)
+    with pytest.raises(FileNotFoundError, match="t1"):
+        discover_lingfeng_cases(
+            tmp_path,
+            {"mra": "mra.nii.gz", "cta": "cta.nii.gz", "t1": "t1.nii.gz"},
+            "label.nii.gz",
+        )
+
+
+def test_multimodal_affine_mismatch_is_reported(tmp_path: Path) -> None:
+    paths = {}
+    for name, affine in (("mra", np.eye(4)), ("cta", np.diag([2, 1, 1, 1]))):
+        path = tmp_path / f"{name}.nii.gz"
+        nib.save(nib.Nifti1Image(np.ones((8, 8, 8)), affine), path)
+        paths[name] = path
+    label = tmp_path / "label.nii.gz"
+    nib.save(nib.Nifti1Image(np.ones((8, 8, 8)), np.eye(4)), label)
+    with pytest.raises(ValueError, match="affine mismatch"):
+        validate_multimodal_case(MultimodalCase("case", paths, label))

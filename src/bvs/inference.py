@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from itertools import product
 from pathlib import Path
+from collections.abc import Mapping
 
 import nibabel as nib
 import numpy as np
@@ -41,18 +42,31 @@ def gaussian_importance_map(
 
 @torch.inference_mode()
 def sliding_window_inference(
-    image: torch.Tensor,
+    image: torch.Tensor | Mapping[str, torch.Tensor],
     model: torch.nn.Module,
     window_size: tuple[int, int, int] = (48, 48, 48),
     overlap: tuple[int, int, int] = (24, 24, 24),
     device: torch.device | str = "cpu",
+    branch: str = "student",
 ) -> torch.Tensor:
-    if image.ndim != 5 or image.shape[0] != 1:
-        raise ValueError("Expected image shape [1, C, D, H, W]")
-    original_shape = tuple(image.shape[2:])
+    tensors = {"image": image} if torch.is_tensor(image) else dict(image)
+    if not tensors:
+        raise ValueError("At least one input modality is required")
+    for name, tensor in tensors.items():
+        if tensor.ndim != 5 or tensor.shape[0] != 1:
+            raise ValueError(
+                f"Expected {name} shape [1, C, D, H, W], got {tuple(tensor.shape)}"
+            )
+    shapes = {tuple(tensor.shape[2:]) for tensor in tensors.values()}
+    if len(shapes) != 1:
+        raise ValueError(f"All inference modalities must share a shape: {sorted(shapes)}")
+    original_shape = next(iter(shapes))
     padding = [max(window - length, 0) for length, window in zip(original_shape, window_size)]
-    image = F.pad(image, (0, padding[2], 0, padding[1], 0, padding[0]))
-    spatial = tuple(image.shape[2:])
+    tensors = {
+        name: F.pad(tensor, (0, padding[2], 0, padding[1], 0, padding[0]))
+        for name, tensor in tensors.items()
+    }
+    spatial = tuple(next(iter(tensors.values())).shape[2:])
     output = torch.zeros((1, 2, *spatial), dtype=torch.float32, device=device)
     normalizer = torch.zeros((1, 1, *spatial), dtype=torch.float32, device=device)
     weights = gaussian_importance_map(window_size).to(device)[None, None]
@@ -62,8 +76,30 @@ def sliding_window_inference(
     ]
     model.eval()
     for z, y, x in product(*positions):
-        patch = image[:, :, z : z + window_size[0], y : y + window_size[1], x : x + window_size[2]]
-        probabilities = model(patch.to(device))["probabilities"].float()
+        patches = {
+            name: tensor[
+                :,
+                :,
+                z : z + window_size[0],
+                y : y + window_size[1],
+                x : x + window_size[2],
+            ].to(device)
+            for name, tensor in tensors.items()
+        }
+        if hasattr(model, "forward_student") and branch == "student":
+            patch_input = (
+                next(iter(patches.values())) if torch.is_tensor(image) else patches
+            )
+            result = model.forward_student(patch_input)
+        elif hasattr(model, "forward_teacher") and branch == "teacher":
+            if torch.is_tensor(image):
+                raise ValueError(
+                    "Teacher sliding-window inference requires a multimodal input mapping"
+                )
+            result = model.forward_teacher(patches)
+        else:
+            result = model(next(iter(patches.values())))
+        probabilities = result["probabilities"].float()
         output[:, :, z : z + window_size[0], y : y + window_size[1], x : x + window_size[2]] += (
             probabilities * weights
         )
@@ -79,11 +115,14 @@ def predict_nifti(
     device: torch.device | str,
     window_size: tuple[int, int, int] = (48, 48, 48),
     overlap: tuple[int, int, int] = (24, 24, 24),
+    branch: str = "student",
 ) -> Path:
     source = nib.load(str(input_path))
     normalized = normalize_mra(source.get_fdata(dtype=np.float32))
     tensor = torch.from_numpy(normalized).unsqueeze(0).unsqueeze(0)
-    probabilities = sliding_window_inference(tensor, model, window_size, overlap, device)
+    probabilities = sliding_window_inference(
+        tensor, model, window_size, overlap, device, branch
+    )
     prediction = torch.argmax(probabilities, dim=1).squeeze(0).cpu().numpy().astype(np.uint8)
     header = source.header.copy()
     header.set_data_dtype(np.uint8)
@@ -91,4 +130,3 @@ def predict_nifti(
     destination.parent.mkdir(parents=True, exist_ok=True)
     nib.save(nib.Nifti1Image(prediction, source.affine, header), str(destination))
     return destination
-

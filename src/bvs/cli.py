@@ -7,7 +7,12 @@ from pathlib import Path
 
 import torch
 
-from .checkpoints import load_lingfeng_student_checkpoint, write_inspection_report
+from .checkpoints import (
+    build_lingfeng_from_spec,
+    convert_legacy_checkpoint,
+    load_lingfeng_student_checkpoint,
+    write_inspection_report,
+)
 from .config import load_config
 from .data.topcow import create_fixed_split, discover_topcow_cases, validate_topcow_dataset
 from .devices import select_device
@@ -33,11 +38,17 @@ def _build_prediction_model(config: dict, checkpoint: str, device: torch.device)
     elif name == "lingfeng_student_transfer":
         model = LingfengMRAStudent()
         payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
-        state = payload.get("model", payload)
+        state = payload.get("model_state", payload.get("model", payload))
         try:
             model.load_state_dict(state, strict=True)
         except RuntimeError:
             load_lingfeng_student_checkpoint(model, checkpoint)
+    elif name == "configurable_lingfeng":
+        payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        if payload.get("schema_version") != 1:
+            raise RuntimeError("Convert legacy Lingfeng checkpoints before prediction")
+        model = build_lingfeng_from_spec(payload["model_spec"])
+        model.load_state_dict(payload["model_state"], strict=True)
     else:
         raise ValueError(f"Unknown model name: {name}")
     return model.to(device).eval()
@@ -61,6 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
     inspect = checkpoint_commands.add_parser("inspect")
     inspect.add_argument("--checkpoint", required=True)
     inspect.add_argument("--output")
+    convert = checkpoint_commands.add_parser("convert")
+    convert.add_argument("--source", required=True)
+    convert.add_argument("--config", required=True)
+    convert.add_argument("--output", required=True)
+    convert.add_argument("--verify", action="store_true")
 
     train = commands.add_parser("train")
     train.add_argument("--config", required=True)
@@ -78,6 +94,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--output", required=True)
 
     smoke = commands.add_parser("smoke-test")
+    smoke.add_argument("--config")
     smoke.add_argument("--device", default="auto")
     smoke.add_argument(
         "--checkpoint",
@@ -98,8 +115,14 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit("--data-root or BVS_DATA_ROOT is required")
         cases = discover_topcow_cases(args.data_root)
         _print(create_fixed_split([case.case_id for case in cases], args.output))
-    elif args.command == "checkpoint":
+    elif args.command == "checkpoint" and args.checkpoint_command == "inspect":
         _print(write_inspection_report(args.checkpoint, args.output))
+    elif args.command == "checkpoint" and args.checkpoint_command == "convert":
+        _print(
+            convert_legacy_checkpoint(
+                args.source, load_config(args.config), args.output, args.verify
+            )
+        )
     elif args.command == "train":
         config = load_config(args.config)
         _print({"run_directory": str(train_from_config(config))})
@@ -124,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
                         policy.device,
                         tuple(config["inference"].get("window_size", [48] * 3)),
                         tuple(config["inference"].get("overlap", [24] * 3)),
+                        str(config["inference"].get("branch", "student")),
                     )
                 )
             )
@@ -131,7 +155,11 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "evaluate":
         _print(evaluate_directories(args.predictions, args.labels, args.output))
     elif args.command == "smoke-test":
-        _print(run_smoke_test(args.device, args.checkpoint, args.output))
+        _print(
+            run_smoke_test(
+                args.device, args.checkpoint, args.output, args.config
+            )
+        )
     return 0
 
 

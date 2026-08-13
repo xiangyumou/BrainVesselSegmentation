@@ -1,0 +1,52 @@
+schema_version: 1
+experiment_name: topcow_mra_cta_teacher
+stage: teacher
+seed: 42
+device: auto
+output_root: runs
+model:
+  name: configurable_lingfeng
+  modalities: [mra, cta]
+  student_modality: mra
+  in_channels: {mra: 1, cta: 1}
+  num_classes: 2
+  base_channels: 16
+data:
+  adapter: topcow
+  root: null
+  train_root: null
+  val_root: null
+  test_root: null
+  split_file: configs/splits/topcow_binary_seed42.json
+  modalities:
+    mra: {directory: imagesTr, pattern: "topcow_mr_{case_id}_0000.nii.gz"}
+    cta: {directory: imagesTrCTA, pattern: "topcow_ct_{case_id}_0000.nii.gz"}
+  label: {directory: cow_seg_labelsTr, pattern: "topcow_mr_{case_id}.nii.gz", strategy: nonzero_to_foreground}
+  crop_or_pad_size: [331, 432, 100]
+  patch_size: [48, 48, 48]
+  patch_overlap: [4, 4, 4]
+  normalization: torchio_zscore
+  sampler: uniform
+  samples_per_volume: 30
+  queue_length: 30
+  validation_samples_per_volume: 10
+  num_workers: 0
+  augmentation: {enabled: false}
+training:
+  epochs: 100
+  batch_size: 4
+  learning_rate: 0.001
+  weight_decay: 0.0
+  optimizer: adam
+  scheduler: {name: step_lr, step_size: 10, gamma: 0.8}
+  early_stopping_patience: 20
+  gradient_accumulation: 1
+  gradient_clip_norm: 1.0
+  logits_clip: null
+  amp: auto
+  resume_checkpoint: null
+loss:
+  segmentation: {cross_entropy_weight: 1.0, dice_weight: 1.0, dice_variant: foreground}
+  logit_distillation: {enabled: false, temperature: 10.0, weight: 0.5}
+  feature_distillation: {enabled: false, weight: 0.5, margin: 1.0, projection_dim: 8}
+inference: {branch: teacher, window_size: [48, 48, 48], overlap: [4, 4, 4], compatibility_mode: gaussian}

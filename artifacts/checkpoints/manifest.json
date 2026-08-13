@@ -5,6 +5,28 @@
     "source": "legacy/source_drop/KD-xia-1/tf_dir/best_KD_model/student_best_checkpoint_multimodaltune9.pt",
     "sha256": "ccecc4b52ffa3832ebf2580945b19e71315f2c26c7f0149f6ecd099ca0997a22",
     "git_tracked": false
+  },
+  "lingfeng_teacher_legacy_source": {
+    "filename": "../../legacy/source_drop/KD-xia-1/tf_dir/teacher_model_multimodal_old/teacher_best_checkpoint_multimodal_tune.pt",
+    "purpose": "Read-only source for four-modality teacher conversion and parity verification.",
+    "sha256": "a9bc92b0b228c3e6759ee3bf4a1d598080bc7411b62e21d47a3694e646b15a5b",
+    "git_tracked": false
+  },
+  "lingfeng_teacher_4modal_v1": {
+    "filename": "converted/lingfeng_teacher_4modal_v1.pt",
+    "purpose": "Unified schema v1 four-modality Lingfeng teacher.",
+    "source": "legacy/source_drop/KD-xia-1/tf_dir/teacher_model_multimodal_old/teacher_best_checkpoint_multimodal_tune.pt",
+    "source_sha256": "a9bc92b0b228c3e6759ee3bf4a1d598080bc7411b62e21d47a3694e646b15a5b",
+    "verification_max_abs_error": 0.0,
+    "git_tracked": false
+  },
+  "lingfeng_student_kd_4modal_v1": {
+    "filename": "converted/lingfeng_student_kd_4modal_v1.pt",
+    "purpose": "Unified schema v1 full Lingfeng model plus restored student projection head.",
+    "source": "lingfeng/student_best_checkpoint_multimodaltune9.pt",
+    "source_sha256": "ccecc4b52ffa3832ebf2580945b19e71315f2c26c7f0149f6ecd099ca0997a22",
+    "verification_max_abs_error": 0.0,
+    "teacher_projection_restored": false,
+    "git_tracked": false
   }
 }
-

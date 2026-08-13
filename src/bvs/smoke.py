@@ -12,14 +12,16 @@ from .checkpoints import verify_lingfeng_equivalence
 from .data.transforms import load_training_arrays, sample_patch
 from .devices import seed_everything, select_device
 from .inference import predict_nifti
-from .models import LingfengMRAStudent
-from .training.losses import CombinedSegmentationLoss
+from .config import load_config, model_spec_from_config
+from .models import ConfigurableLingfengModel, LingfengMRAStudent
+from .training.losses import CombinedSegmentationLoss, MetricContrastiveLoss, TemperatureKLLoss
 
 
 def run_smoke_test(
     requested_device: str = "auto",
     checkpoint: str | Path = "artifacts/checkpoints/lingfeng/student_best_checkpoint_multimodaltune9.pt",
     output: str | Path | None = None,
+    config_path: str | Path | None = None,
 ) -> dict:
     seed_everything(42)
     policy = select_device(requested_device)
@@ -75,6 +77,73 @@ def run_smoke_test(
     train_loss.backward()
     optimizer.step()
 
+    kd_report = None
+    if config_path is not None:
+        config = load_config(config_path)
+        spec = model_spec_from_config(config)
+        compact = dict(spec)
+        compact["base_channels"] = min(int(spec["base_channels"]), 4)
+        teacher = ConfigurableLingfengModel(
+            compact["modalities"],
+            compact["student_modality"],
+            compact["in_channels"],
+            compact["num_classes"],
+            compact["base_channels"],
+        ).to(policy.device)
+        student = ConfigurableLingfengModel(
+            compact["modalities"],
+            compact["student_modality"],
+            compact["in_channels"],
+            compact["num_classes"],
+            compact["base_channels"],
+        ).to(policy.device)
+        synthetic_inputs = {
+            name: torch.randn(
+                2, int(compact["in_channels"][name]), 16, 16, 16, device=policy.device
+            )
+            for name in compact["modalities"]
+        }
+        teacher_output = teacher.forward_teacher(synthetic_inputs)
+        student_output = student.forward_student(synthetic_inputs)
+        projection_dim = int(
+            config["loss"]["feature_distillation"]["projection_dim"]
+        )
+        student_projection = torch.nn.Linear(
+            compact["base_channels"], projection_dim, bias=False
+        ).to(policy.device)
+        teacher_projection = torch.nn.Linear(
+            compact["base_channels"], projection_dim, bias=False
+        ).to(policy.device)
+        synthetic_label = torch.randint(
+            0, compact["num_classes"], (2, 16, 16, 16), device=policy.device
+        )
+        segment = CombinedSegmentationLoss(
+            dice_variant="legacy_multiclass_squared",
+            num_classes=compact["num_classes"],
+        )(student_output["logits"], synthetic_label)
+        kd = TemperatureKLLoss(10.0)(
+            student_output["logits"], teacher_output["logits"].detach()
+        )
+        contrast = MetricContrastiveLoss(1.0)(
+            torch.nn.functional.normalize(
+                student_projection(student_output["metric_feature"]), dim=1
+            ),
+            torch.nn.functional.normalize(
+                teacher_projection(teacher_output["metric_feature"].detach()), dim=1
+            ),
+        )
+        combined = segment + 0.5 * kd + 0.5 * contrast
+        combined.backward()
+        kd_report = {
+            "teacher_loss": float(
+                CombinedSegmentationLoss(
+                    dice_variant="legacy_multiclass_squared",
+                    num_classes=compact["num_classes"],
+                )(teacher_output["logits"], synthetic_label).detach().cpu()
+            ),
+            "student_kd_loss": float(combined.detach().cpu()),
+        }
+
     validation_image, validation_label_array = load_training_arrays(inputs[1], labels[1])
     validation_tensor = (
         torch.from_numpy(validation_image).unsqueeze(0).unsqueeze(0).to(policy.device)
@@ -111,6 +180,7 @@ def run_smoke_test(
         "synthetic_predictions": outputs,
         "checkpoint": str(smoke_checkpoint),
         "checkpoint_created": smoke_checkpoint.exists(),
+        "teacher_kd": kd_report,
     }
     destination = parent / "smoke_test_metrics.json"
     destination.write_text(json.dumps(report, indent=2), encoding="utf-8")

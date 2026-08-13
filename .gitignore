@@ -17,8 +17,15 @@ build/
 /reports/
 /docs/
 /dicc/
+/legacy/
 
-# Original source drops and model weights
-legacy/source_drop/
-artifacts/checkpoints/**/*.pt
-artifacts/checkpoints/**/*.pth
+# Model weights and medical images
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.safetensors
+*.h5
+*.hdf5
+*.nii
+*.nii.gz

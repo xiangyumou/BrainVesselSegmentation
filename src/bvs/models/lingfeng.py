@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+
 import torch
 from torch import nn
 from torch.nn import functional as F
 
 N_BASE_FILTERS = 16
 FEATURE_DIM = 16
+STAGES = ("s1", "s2", "s3", "s4")
 
 
 class InstanceNorm3d(nn.Module):
@@ -33,12 +36,7 @@ class GeneralConv3d(nn.Module):
         pad = (k_size - 1) // 2
         self.pad_layer: nn.Module | None = nn.ReplicationPad3d(pad) if pad else None
         self.conv = nn.Conv3d(
-            in_channels,
-            out_channels,
-            k_size,
-            stride,
-            padding=0,
-            bias=norm_type is None,
+            in_channels, out_channels, k_size, stride, padding=0, bias=norm_type is None
         )
         self.dropout = nn.Identity()
         self.norm = InstanceNorm3d() if norm_type == "Ins" else nn.Identity()
@@ -72,9 +70,9 @@ class LinearLayer(nn.Module):
 
 
 class FeatureEncoder(nn.Module):
-    def __init__(self, in_channels: int = 1) -> None:
+    def __init__(self, in_channels: int = 1, base_channels: int = N_BASE_FILTERS) -> None:
         super().__init__()
-        c = N_BASE_FILTERS
+        c = base_channels
         self.e1_c1 = GeneralConv3d(in_channels, c)
         self.e1_c2 = GeneralConv3d(c, c)
         self.e1_c3 = GeneralConv3d(c, c)
@@ -104,9 +102,9 @@ class FeatureEncoder(nn.Module):
 
 
 class MaskDecoder(nn.Module):
-    def __init__(self, num_classes: int = 2) -> None:
+    def __init__(self, num_classes: int = 2, base_channels: int = N_BASE_FILTERS) -> None:
         super().__init__()
-        c = N_BASE_FILTERS
+        c = base_channels
         self.d3_up = nn.Upsample(scale_factor=2, mode="nearest")
         self.d3_c1 = GeneralConv3d(c * 8, c * 4)
         self.d3_c2 = GeneralConv3d(c * 8, c * 4)
@@ -119,12 +117,10 @@ class MaskDecoder(nn.Module):
         self.d1_c1 = GeneralConv3d(c * 2, c)
         self.d1_c2 = GeneralConv3d(c * 2, c)
         self.d1_out = GeneralConv3d(c, c, k_size=1)
-        self.seg_logit = GeneralConv3d(
-            c, num_classes, k_size=1, norm_type=None, act_type=None
-        )
+        self.seg_logit = GeneralConv3d(c, num_classes, k_size=1, norm_type=None, act_type=None)
 
     def forward(
-        self, inputs: dict[str, torch.Tensor]
+        self, inputs: Mapping[str, torch.Tensor]
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         d3 = self.d3_c1(self.d3_up(inputs["s4"]))
         d3 = self.d3_out(self.d3_c2(torch.cat((d3, inputs["s3"]), dim=1)))
@@ -137,11 +133,14 @@ class MaskDecoder(nn.Module):
 
 
 class MetricLayer(nn.Module):
-    def __init__(self) -> None:
+    def __init__(
+        self, base_channels: int = N_BASE_FILTERS, feature_dim: int | None = None
+    ) -> None:
         super().__init__()
+        feature_dim = base_channels if feature_dim is None else feature_dim
         self.avg_pool = nn.AdaptiveAvgPool3d(1)
-        self.linear_0 = LinearLayer(N_BASE_FILTERS, FEATURE_DIM * 2, "relu")
-        self.linear_1 = LinearLayer(FEATURE_DIM * 2, FEATURE_DIM, None)
+        self.linear_0 = LinearLayer(base_channels, feature_dim * 2, "relu")
+        self.linear_1 = LinearLayer(feature_dim * 2, feature_dim, None)
 
     def forward(
         self, x: torch.Tensor
@@ -153,26 +152,182 @@ class MetricLayer(nn.Module):
         return flat, layer1, layer2, normalized
 
 
-class LingfengMRAStudent(nn.Module):
-    def __init__(self, num_classes: int = 2) -> None:
+def _branch_output(
+    probabilities: torch.Tensor,
+    logits: torch.Tensor,
+    decoded: torch.Tensor,
+    metric: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    return {
+        "logits": logits,
+        "probabilities": probabilities,
+        "decoder_feature": decoded,
+        "metric_feature": metric[-1],
+        # Backward-compatible alias used by the original bvs API.
+        "features": metric[-1],
+    }
+
+
+class ConfigurableLingfengModel(nn.Module):
+    """Dynamic Lingfeng teacher/student network.
+
+    The four-modality ``mra,t1,t2,pd`` instance has the same tensor shapes and
+    operation order as the archived ``MultiModalSeg`` implementation.
+    """
+
+    def __init__(
+        self,
+        modalities: Sequence[str],
+        student_modality: str,
+        in_channels: Mapping[str, int],
+        num_classes: int,
+        base_channels: int = N_BASE_FILTERS,
+    ) -> None:
         super().__init__()
-        self.input_mra_encoder = FeatureEncoder(1)
-        self.mask_de_prs = MaskDecoder(num_classes)
-        self.metric_prs = MetricLayer()
+        ordered = tuple(str(item).lower() for item in modalities)
+        if not ordered or len(set(ordered)) != len(ordered):
+            raise ValueError("modalities must be a non-empty list of unique names")
+        if student_modality not in ordered:
+            raise ValueError(f"student_modality '{student_modality}' is not in modalities")
+        unknown_channels = set(in_channels) - set(ordered)
+        if unknown_channels:
+            raise ValueError(f"in_channels contains unknown modalities: {sorted(unknown_channels)}")
+        missing_channels = set(ordered) - set(in_channels)
+        if missing_channels:
+            raise ValueError(f"in_channels is missing modalities: {sorted(missing_channels)}")
+        if num_classes < 2 or base_channels < 1:
+            raise ValueError("num_classes must be >= 2 and base_channels must be >= 1")
+
+        self.modalities = ordered
+        self.student_modality = student_modality
+        self.in_channels = {name: int(in_channels[name]) for name in ordered}
+        self.num_classes = int(num_classes)
+        self.base_channels = int(base_channels)
+        self.encoders = nn.ModuleDict(
+            {
+                name: FeatureEncoder(self.in_channels[name], self.base_channels)
+                for name in ordered
+            }
+        )
+        count = len(ordered)
+        self.attention = nn.ModuleDict()
+        self.fusion = nn.ModuleDict()
+        for index, stage in enumerate(STAGES):
+            channels = self.base_channels * (2**index)
+            self.attention[stage] = GeneralConv3d(
+                channels * count, count, k_size=1, norm_type=None, act_type=None
+            )
+            self.fusion[stage] = GeneralConv3d(
+                channels * count, channels, k_size=1
+            )
+        self.teacher_decoder = MaskDecoder(self.num_classes, self.base_channels)
+        self.teacher_metric = MetricLayer(self.base_channels)
+        self.student_decoder = MaskDecoder(self.num_classes, self.base_channels)
+        self.student_metric = MetricLayer(self.base_channels)
+
+    @property
+    def model_spec(self) -> dict[str, object]:
+        return {
+            "name": "configurable_lingfeng",
+            "modalities": list(self.modalities),
+            "student_modality": self.student_modality,
+            "in_channels": dict(self.in_channels),
+            "num_classes": self.num_classes,
+            "base_channels": self.base_channels,
+        }
+
+    def _student_tensor(
+        self, inputs: Mapping[str, torch.Tensor] | torch.Tensor
+    ) -> torch.Tensor:
+        if torch.is_tensor(inputs):
+            return inputs
+        if self.student_modality not in inputs:
+            raise KeyError(f"Missing student modality '{self.student_modality}'")
+        return inputs[self.student_modality]
+
+    def forward_student(
+        self, inputs: Mapping[str, torch.Tensor] | torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        encoded = self.encoders[self.student_modality](
+            self._student_tensor(inputs), self.training
+        )
+        probabilities, logits, decoded = self.student_decoder(encoded)
+        return _branch_output(
+            probabilities, logits, decoded, self.student_metric(decoded)
+        )
+
+    def forward_teacher(
+        self, inputs: Mapping[str, torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        missing = [name for name in self.modalities if name not in inputs]
+        if missing:
+            raise KeyError(f"Missing teacher modalities: {missing}")
+        encoded = {
+            name: self.encoders[name](inputs[name], self.training)
+            for name in self.modalities
+        }
+        shared: dict[str, torch.Tensor] = {}
+        for stage in STAGES:
+            stage_features = [encoded[name][stage] for name in self.modalities]
+            weights = torch.sigmoid(self.attention[stage](torch.cat(stage_features, dim=1)))
+            weighted = [
+                feature * weights[:, index : index + 1]
+                for index, feature in enumerate(stage_features)
+            ]
+            shared[stage] = self.fusion[stage](torch.cat(weighted, dim=1))
+        probabilities, logits, decoded = self.teacher_decoder(shared)
+        output = _branch_output(
+            probabilities, logits, decoded, self.teacher_metric(decoded)
+        )
+        output["attention_features"] = shared
+        return output
+
+    def forward(
+        self,
+        inputs: Mapping[str, torch.Tensor] | torch.Tensor,
+        branch: str = "student",
+    ) -> dict[str, torch.Tensor] | dict[str, dict[str, torch.Tensor]]:
+        if branch == "student":
+            return self.forward_student(inputs)
+        if branch == "teacher":
+            if not isinstance(inputs, Mapping):
+                raise TypeError("Teacher branch requires a modality mapping")
+            return self.forward_teacher(inputs)
+        if branch == "both":
+            if not isinstance(inputs, Mapping):
+                raise TypeError("Both branches require a modality mapping")
+            # Encoder sharing is intentionally not introduced here: legacy forward
+            # computes the branches in this order and equivalence is the priority.
+            return {
+                "teacher": self.forward_teacher(inputs),
+                "student": self.forward_student(inputs),
+            }
+        raise ValueError("branch must be one of: teacher, student, both")
+
+
+class StudentInferenceView(nn.Module):
+    """A parameter-sharing deployment view of a configurable model."""
+
+    def __init__(self, model: ConfigurableLingfengModel) -> None:
+        super().__init__()
+        self.model = model
 
     def forward(self, image: torch.Tensor) -> dict[str, torch.Tensor]:
-        encoded = self.input_mra_encoder(image, self.training)
-        probabilities, logits, decoded = self.mask_de_prs(encoded)
-        _, _, _, features = self.metric_prs(decoded)
-        return {
-            "logits": logits,
-            "probabilities": probabilities,
-            "features": features,
-        }
+        return self.model.forward_student(image)
+
+
+class LingfengMRAStudent(ConfigurableLingfengModel):
+    """Compatibility constructor for the original public single-MRA API."""
+
+    def __init__(self, num_classes: int = 2) -> None:
+        super().__init__(["mra"], "mra", {"mra": 1}, num_classes, N_BASE_FILTERS)
+
+    def forward(self, image: torch.Tensor) -> dict[str, torch.Tensor]:
+        return self.forward_student(image)
 
 
 class LingfengLegacyModel(nn.Module):
-    """Exact active structure of the archived MultiModalSeg checkpoint."""
+    """Exact active structure and key names of the archived MultiModalSeg."""
 
     def __init__(self, num_classes: int = 2) -> None:
         super().__init__()
@@ -195,7 +350,7 @@ class LingfengLegacyModel(nn.Module):
         self.metric_abs = MetricLayer()
 
     def forward(
-        self, inputs: dict[str, torch.Tensor], is_training: bool = True, drop_rate: float = 0.3
+        self, inputs: Mapping[str, torch.Tensor], is_training: bool = True, drop_rate: float = 0.3
     ) -> dict[str, torch.Tensor | dict[str, torch.Tensor]]:
         mra = self.input_mra_encoder(inputs["source"], is_training, drop_rate)
         modalities = [
@@ -207,7 +362,7 @@ class LingfengLegacyModel(nn.Module):
         shared: dict[str, torch.Tensor] = {}
         attention = (self.att_c1, self.att_c2, self.att_c3, self.att_c4)
         fusion = (self.fusion_c1, self.fusion_c2, self.fusion_c3, self.fusion_c4)
-        for index, stage in enumerate(("s1", "s2", "s3", "s4")):
+        for index, stage in enumerate(STAGES):
             stage_features = [item[stage] for item in modalities]
             weights = torch.sigmoid(attention[index](torch.cat(stage_features, dim=1)))
             weighted = [

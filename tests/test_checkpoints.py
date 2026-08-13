@@ -6,10 +6,13 @@ import pytest
 import torch
 
 from bvs.checkpoints import (
+    build_lingfeng_from_spec,
+    convert_legacy_checkpoint,
     load_lingfeng_student_checkpoint,
     verify_lingfeng_equivalence,
 )
-from bvs.models import LingfengMRAStudent
+from bvs.config import load_config
+from bvs.models import LingfengLegacyModel, LingfengMRAStudent
 
 CHECKPOINT = (
     Path(__file__).resolve().parents[1]
@@ -40,3 +43,36 @@ def test_missing_student_key_fails_loudly(tmp_path: Path) -> None:
     torch.save({"model": state}, checkpoint)
     with pytest.raises(RuntimeError, match="missing="):
         load_lingfeng_student_checkpoint(model, checkpoint)
+
+
+@pytest.mark.skipif(not CHECKPOINT.exists(), reason="Lingfeng checkpoint is not installed")
+def test_real_student_checkpoint_converts_to_unified_schema(tmp_path: Path) -> None:
+    config = load_config(
+        Path(__file__).resolve().parents[1]
+        / "configs/reproduction/lingfeng_student_kd_legacy_code.yaml"
+    )
+    output = tmp_path / "unified.pt"
+    report = convert_legacy_checkpoint(CHECKPOINT, config, output, verify=True)
+    payload = torch.load(output, map_location="cpu", weights_only=False)
+    assert report["verification"]["max_abs_error"] <= 1e-5
+    assert payload["schema_version"] == 1
+    assert payload["student_projection_state"]["weight"].shape == (8, 16)
+    assert payload["teacher_projection_state"] is None
+    model = build_lingfeng_from_spec(payload["model_spec"])
+    model.load_state_dict(payload["model_state"], strict=True)
+
+
+def test_conversion_rejects_wrong_shape_without_writing_output(tmp_path: Path) -> None:
+    source = LingfengLegacyModel().state_dict()
+    first = next(iter(source))
+    source[first] = source[first][0:1]
+    checkpoint = tmp_path / "bad.pt"
+    output = tmp_path / "should_not_exist.pt"
+    torch.save({"model": source}, checkpoint)
+    config = load_config(
+        Path(__file__).resolve().parents[1]
+        / "configs/reproduction/lingfeng_teacher_legacy_code.yaml"
+    )
+    with pytest.raises(ValueError, match="Shape mismatch"):
+        convert_legacy_checkpoint(checkpoint, config, output)
+    assert not output.exists()

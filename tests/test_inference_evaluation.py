@@ -8,6 +8,7 @@ import torch
 
 from bvs.evaluation import segmentation_metrics
 from bvs.inference import predict_nifti, sliding_window_inference
+from bvs.models import ConfigurableLingfengModel
 
 
 class ForegroundModel(torch.nn.Module):
@@ -44,3 +45,19 @@ def test_metrics_are_one_for_identical_foreground() -> None:
     metrics = segmentation_metrics(mask, mask)
     assert all(abs(value - 1.0) < 1e-8 for value in metrics.values())
 
+
+def test_multimodal_teacher_sliding_window() -> None:
+    model = ConfigurableLingfengModel(
+        ["mra", "cta"], "mra", {"mra": 1, "cta": 1}, 2, base_channels=2
+    )
+    probabilities = sliding_window_inference(
+        {
+            "mra": torch.randn(1, 1, 17, 18, 19),
+            "cta": torch.randn(1, 1, 17, 18, 19),
+        },
+        model,
+        (16, 16, 16),
+        (8, 8, 8),
+        branch="teacher",
+    )
+    assert probabilities.shape == (1, 2, 17, 18, 19)

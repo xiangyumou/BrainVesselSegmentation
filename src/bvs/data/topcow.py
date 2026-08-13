@@ -17,6 +17,7 @@ class TopCoWCase:
     case_id: str
     image: Path
     label: Path
+    cta: Path | None = None
 
 
 def topcow_release_root(data_root: str | Path) -> Path:
@@ -52,6 +53,67 @@ def discover_topcow_cases(data_root: str | Path) -> list[TopCoWCase]:
             f"missing_images={missing_images}"
         )
     return [TopCoWCase(case_id, images[case_id], labels[case_id]) for case_id in sorted(images)]
+
+
+def discover_topcow_multimodal_cases(
+    data_root: str | Path,
+    modality_specs: dict[str, str | dict[str, str]],
+    label_spec: str | dict[str, str],
+) -> list[tuple[str, dict[str, Path], Path]]:
+    """Discover TopCoW modalities using configured directory/pattern pairs.
+
+    Patterns contain ``{case_id}``, for example
+    ``topcow_mr_{case_id}_0000.nii.gz``. This deliberately avoids treating CTA
+    as an MRA-derived pseudo modality.
+    """
+
+    release = topcow_release_root(data_root)
+
+    def unpack(spec: str | dict[str, str], default_directory: str) -> tuple[Path, str]:
+        if isinstance(spec, str):
+            return release / default_directory, spec
+        unknown = set(spec) - {"directory", "pattern", "filename", "strategy"}
+        if unknown:
+            raise ValueError(f"Unknown TopCoW file specification fields: {sorted(unknown)}")
+        pattern = spec.get("pattern", spec.get("filename"))
+        if not pattern:
+            raise ValueError("TopCoW file specification requires pattern")
+        return release / spec.get("directory", default_directory), pattern
+
+    def index(spec: str | dict[str, str], default_directory: str) -> dict[str, Path]:
+        directory, pattern = unpack(spec, default_directory)
+        if "{case_id}" not in pattern:
+            raise ValueError(f"TopCoW pattern must contain {{case_id}}: {pattern}")
+        regex = re.compile(
+            "^" + re.escape(pattern).replace(re.escape("{case_id}"), r"(?P<id>.+)") + "$"
+        )
+        return _indexed_files(directory, regex)
+
+    indexed_modalities = {
+        name: index(spec, "imagesTr") for name, spec in modality_specs.items()
+    }
+    labels = index(label_spec, "cow_seg_labelsTr")
+    all_ids = set(labels)
+    for values in indexed_modalities.values():
+        all_ids |= set(values)
+    errors: dict[str, list[str]] = {}
+    for name, values in indexed_modalities.items():
+        missing = sorted(all_ids - set(values))
+        if missing:
+            errors[f"missing_{name}"] = missing
+    missing_labels = sorted(all_ids - set(labels))
+    if missing_labels:
+        errors["missing_labels"] = missing_labels
+    if errors:
+        raise ValueError(f"TopCoW multimodal pairing failed: {errors}")
+    return [
+        (
+            case_id,
+            {name: values[case_id] for name, values in indexed_modalities.items()},
+            labels[case_id],
+        )
+        for case_id in sorted(all_ids)
+    ]
 
 
 def binary_label(label: np.ndarray) -> np.ndarray:
@@ -135,4 +197,3 @@ def create_fixed_split(
 
 def cases_by_id(cases: list[TopCoWCase]) -> dict[str, TopCoWCase]:
     return {case.case_id: case for case in cases}
-

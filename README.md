@@ -14,13 +14,12 @@ src/bvs/                    active Python package
 configs/train/              baseline and transfer configurations
 configs/splits/             immutable generated patient split
 artifacts/checkpoints/      local, Git-ignored weights plus tracked manifest
-legacy/source_drop/         untouched archived experiment directories (Git-ignored)
-legacy/MANIFEST.sha256      archive integrity hashes
 tests/                      unit and integration tests
 ```
 
-The two original `KD-xia*` directories were moved intact under `legacy/source_drop/`.
-They are not imported by active code.
+Legacy source drops and model weights are retained locally for conversion and parity checks,
+but are not distributed in this public repository. Legacy code is not imported by the active
+package.
 
 ## Installation
 
@@ -161,7 +160,88 @@ pytest -q
 bvs smoke-test --device auto
 ```
 
-The smoke test loads the real checkpoint, checks legacy/student logits, runs one training and
-validation step, performs complete sliding-window inference on two synthetic NIfTI cases,
-and writes `smoke_test_metrics.json`. A full 200-epoch TopCoW training run is intentionally
-not part of the Apple M3 smoke test.
+Tests that require the real Lingfeng checkpoint are skipped when the weight is not installed.
+The smoke test itself requires the local checkpoint: it checks legacy/student logits, runs one
+training and validation step, performs complete sliding-window inference on two synthetic
+NIfTI cases, and writes `smoke_test_metrics.json`. A full 200-epoch TopCoW training run is
+intentionally not part of the Apple M3 smoke test.
+
+## Unified Lingfeng reproduction
+
+The active package now provides one configuration-driven path for the Lingfeng
+multimodal teacher, MRA student, knowledge distillation, and TopCoW extensions.
+
+### Checkpoint conversion
+
+Convert the archived four-modality teacher once:
+
+```bash
+bvs checkpoint convert \
+  --source legacy/source_drop/KD-xia-1/tf_dir/teacher_model_multimodal_old/teacher_best_checkpoint_multimodal_tune.pt \
+  --config configs/reproduction/lingfeng_teacher_legacy_code.yaml \
+  --output artifacts/checkpoints/converted/lingfeng_teacher_4modal_v1.pt \
+  --verify
+```
+
+Convert the archived KD student checkpoint:
+
+```bash
+bvs checkpoint convert \
+  --source artifacts/checkpoints/lingfeng/student_best_checkpoint_multimodaltune9.pt \
+  --config configs/reproduction/lingfeng_student_kd_legacy_code.yaml \
+  --output artifacts/checkpoints/converted/lingfeng_student_kd_4modal_v1.pt \
+  --verify
+```
+
+Conversion is strict: unknown keys, missing keys, shape mismatches, or CPU
+output error above `1e-5` abort before the final file is written.
+
+### Teacher and KD training
+
+All stages use the same command:
+
+```bash
+bvs train --config configs/reproduction/lingfeng_teacher_legacy_code.yaml
+bvs train --config configs/reproduction/lingfeng_student_kd_legacy_code.yaml
+bvs train --config configs/train/unet3d_topcow_binary.yaml
+```
+
+Set `data.train_root` and `data.val_root` for separate Lingfeng case-directory
+splits. For TopCoW, set `data.root` or `BVS_DATA_ROOT`. A KD run requires a
+unified teacher checkpoint and fails if it is missing or incompatible.
+
+Each run writes the resolved YAML, environment metadata, best/latest unified
+checkpoints, CSV/JSON metrics, and TensorBoard logs under
+`runs/{experiment_name}/{timestamp}`.
+
+### Unified inference and smoke test
+
+```bash
+bvs predict \
+  --config configs/reproduction/lingfeng_student_eval_legacy_code.yaml \
+  --checkpoint artifacts/checkpoints/converted/lingfeng_student_kd_4modal_v1.pt \
+  --input INPUT.nii.gz \
+  --output PREDICTION.nii.gz
+
+bvs smoke-test \
+  --config configs/reproduction/lingfeng_student_kd_legacy_code.yaml \
+  --device mps
+```
+
+The student inference view accesses only the configured student modality.
+
+The unified implementation preserves the four independent modality encoders, sigmoid modality
+attention, per-scale fusion, separate teacher/student decoder and metric layers, legacy Dice
+and KD formulas, and configurable teacher-logit and gradient clipping. Exact historical
+training trajectories cannot be recovered because legacy global seeding was disabled. The
+historical teacher checkpoint also omitted the frozen teacher projection head used during KD;
+converted checkpoints record that missing state, while new unified runs save both projection
+heads. Original private case IDs, preprocessing provenance, and train/validation splits are
+not embedded in the checkpoints, so the reported paper Dice cannot be claimed as reproduced
+without those inputs.
+
+Archived teacher and student checkpoints were converted on CPU during development. Their
+logits, probabilities, decoder features, and metric features matched the legacy models with
+maximum absolute error `0.0` against a required tolerance of `1e-5`. The TopCoW MRA/CTA
+profiles are a new paired two-modality extension; they do not reinterpret CTA as T1, T2, or
+PD, and require matching shape, affine, and orientation.

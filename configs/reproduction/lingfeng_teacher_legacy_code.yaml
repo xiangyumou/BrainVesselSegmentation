@@ -1,0 +1,60 @@
+schema_version: 1
+experiment_name: lingfeng_teacher_legacy_code
+stage: teacher
+seed: 42
+device: auto
+output_root: runs
+model:
+  name: configurable_lingfeng
+  modalities: [mra, t1, t2, pd]
+  student_modality: mra
+  in_channels: {mra: 1, t1: 1, t2: 1, pd: 1}
+  num_classes: 2
+  base_channels: 16
+data:
+  adapter: lingfeng_case_directory
+  train_root: null
+  val_root: null
+  test_root: null
+  split_file: null
+  modalities:
+    mra: {filename: MRA_subtrMeanDivStd.nii.gz}
+    t1: {filename: T1_subtrMeanDivStd.nii.gz}
+    t2: {filename: T2_subtrMeanDivStd.nii.gz}
+    pd: {filename: PD_subtrMeanDivStd.nii.gz}
+  label: {filename: OTMultiClass.nii.gz, strategy: nonzero_to_foreground}
+  crop_or_pad_size: [331, 432, 100]
+  patch_size: [48, 48, 48]
+  patch_overlap: [4, 4, 4]
+  normalization: torchio_zscore
+  sampler: uniform
+  samples_per_volume: 30
+  queue_length: 30
+  validation_samples_per_volume: 10
+  num_workers: 0
+  augmentation: {enabled: false}
+training:
+  epochs: 100
+  batch_size: 4
+  learning_rate: 0.001
+  weight_decay: 0.0
+  optimizer: adam
+  scheduler: {name: step_lr, step_size: 10, gamma: 0.8}
+  early_stopping_patience: 20
+  gradient_accumulation: 1
+  gradient_clip_norm: 1.0
+  logits_clip: 35.0
+  amp: auto
+  resume_checkpoint: null
+loss:
+  segmentation:
+    cross_entropy_weight: 1.0
+    dice_weight: 1.0
+    dice_variant: legacy_multiclass_squared
+  logit_distillation: {enabled: false, temperature: 10.0, weight: 0.5}
+  feature_distillation: {enabled: false, weight: 0.5, margin: 1.0, projection_dim: 8}
+inference:
+  branch: teacher
+  window_size: [48, 48, 48]
+  overlap: [4, 4, 4]
+  compatibility_mode: torchio
