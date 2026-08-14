@@ -6,7 +6,6 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
-#SBATCH --time=1-00:00:00
 #SBATCH --chdir=/home/user/xiangyu/Projects/BrainVesselSegmentation
 #SBATCH --output=/home/user/xiangyu/Projects/BrainVesselSegmentation/dicc/logs/%x_%j.log
 #SBATCH --error=/home/user/xiangyu/Projects/BrainVesselSegmentation/dicc/logs/%x_%j.log

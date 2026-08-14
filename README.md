@@ -167,8 +167,9 @@ Submit the architecture-matched random-initialization experiment:
 sbatch dicc/scripts/train_lingfeng_scratch_topcow.sh
 ```
 
-The job requests one A100 GPU, 4 CPU cores, 32 GB RAM, and 24 hours. It uses the `mu` Conda
-environment directly, sets the local TopCoW release as `BVS_DATA_ROOT`, and always passes
+The job requests one A100 GPU, 4 CPU cores, and 32 GB RAM, while leaving the time limit to
+the cluster default. It uses the `mu` Conda environment directly, sets the local TopCoW
+release as `BVS_DATA_ROOT`, and always passes
 `--c`: a compatible interrupted run resumes in place, while the first submission starts a
 new run using the selected configuration. Slurm stdout and stderr are written under `dicc/logs/`.
 Both streams are merged into one `bvs-topcow-ft_<job-id>.log` or
