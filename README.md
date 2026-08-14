@@ -58,24 +58,25 @@ The global default random seed is `42`.
 
 ## Data
 
-Set one root containing:
+Point `BVS_DATA_ROOT` at the release directory configured by the training profiles:
 
 ```text
-$BVS_DATA_ROOT/
-├── TopCoW2024_Data_Release/
-│   ├── imagesTr/topcow_mr_{case_id}_0000.nii.gz
-│   └── cow_seg_labelsTr/topcow_mr_{case_id}.nii.gz
-├── MRA_IXI_HH/
-└── MRA_Lausanne/
+TopCoW2024_Data_Release/       # BVS_DATA_ROOT
+├── imagesTr/
+│   ├── topcow_mr_{case_id}_0000.nii.gz
+│   └── topcow_ct_{case_id}_0000.nii.gz
+└── cow_seg_labelsTr/
+    ├── topcow_mr_{case_id}.nii.gz
+    └── topcow_ct_{case_id}.nii.gz
 ```
 
 Validate all 125 paired TopCoW MRA cases and generate the fixed 80/20/25 split:
 
 ```bash
-export BVS_DATA_ROOT=/path/to/data
+export BVS_DATA_ROOT=/path/to/TopCoW2024_Data_Release
 bvs data validate --data-root "$BVS_DATA_ROOT"
 bvs data split --data-root "$BVS_DATA_ROOT" \
-  --output configs/splits/topcow_binary_seed42.json
+  --output configs/splits/topcow2024_release_seed42.json
 ```
 
 An existing split file is never overwritten. The split algorithm sorts patient IDs, shuffles
@@ -108,7 +109,7 @@ dataset.
 Place the archived checkpoint at:
 
 ```text
-artifacts/checkpoints/lingfeng/student_best_checkpoint_multimodaltune9.pt
+artifacts/checkpoints/lingfeng-student_best_checkpoint_multimodaltune9.pt
 ```
 
 Its expected SHA256 is:
@@ -120,7 +121,7 @@ ccecc4b52ffa3832ebf2580945b19e71315f2c26c7f0149f6ecd099ca0997a22
 Inspect the mapping:
 
 ```bash
-bvs checkpoint inspect --checkpoint artifacts/checkpoints/lingfeng/student_best_checkpoint_multimodaltune9.pt
+bvs checkpoint inspect --checkpoint artifacts/checkpoints/lingfeng-student_best_checkpoint_multimodaltune9.pt
 ```
 
 Only `input_mra_encoder`, `mask_de_prs`, and `metric_prs` are loaded into
@@ -163,22 +164,74 @@ and copied header. `compatibility_mode: gaussian` uses Gaussian blending;
 `compatibility_mode: torchio` uses TorchIO `GridSampler`/`GridAggregator` with average
 overlap. Every overlap value must satisfy `0 <= overlap < window_size`.
 
+For `data.adapter: pattern_directory`, modality and label discovery is driven by each
+configured `directory` and `pattern`. A `{case_id}` placeholder is required. Passing either
+the dataset root or the configured student-modality directory filters out files belonging to
+other modalities, and batch prediction names outputs using `data.label.pattern`.
+
+For example, the transfer profile selects MRA from a directory that also contains CTA:
+
+```yaml
+data:
+  adapter: pattern_directory
+  modalities:
+    mra:
+      directory: imagesTr
+      pattern: topcow_mr_{case_id}_0000.nii.gz
+  label:
+    directory: cow_seg_labelsTr
+    pattern: topcow_mr_{case_id}.nii.gz
+```
+
+The directory and filename patterns are dataset-defined; they do not need to use TopCoW
+names. Training, prediction, and config-driven evaluation share the same discovery rules.
+
 ```bash
 bvs predict --config configs/train/unet3d_topcow_binary.yaml \
   --checkpoint runs/.../checkpoints/best.pt \
-  --input /path/to/nifti_or_directory --output predictions/internal
+  --input /path/to/dataset_root --output predictions/internal
 
-bvs evaluate --predictions predictions/internal \
-  --labels /path/to/labels --output reports/internal
+bvs evaluate --config configs/train/unet3d_topcow_binary.yaml \
+  --predictions predictions/internal --data-root /path/to/dataset_root \
+  --output reports/internal
 ```
 
 Evaluation requires prediction and label filenames to match exactly by default.
 Use `--allow-partial` only when intentionally evaluating their intersection;
 the report will list missing and unexpected cases.
+The legacy `--labels /path/to/labels` evaluation form remains available when no dataset
+configuration is needed.
 
-Student prediction accepts one NIfTI or a flat directory of NIfTI files. Teacher prediction
-requires either a Lingfeng case directory containing every configured modality, a root whose
-direct child directories are complete cases, or a TopCoW dataset root:
+### Pretrained MRA zero-shot inference
+
+The archived Lingfeng student checkpoint can be evaluated on all configured TopCoW MRA
+cases without creating a filtered directory:
+
+```bash
+mkdir -p predictions/pretrained_zero_shot
+
+bvs predict \
+  --config configs/train/lingfeng_transfer_topcow_binary.yaml \
+  --checkpoint artifacts/checkpoints/lingfeng-student_best_checkpoint_multimodaltune9.pt \
+  --input "$BVS_DATA_ROOT" \
+  --output predictions/pretrained_zero_shot \
+  --device cuda
+
+bvs evaluate \
+  --config configs/train/lingfeng_transfer_topcow_binary.yaml \
+  --predictions predictions/pretrained_zero_shot \
+  --data-root "$BVS_DATA_ROOT" \
+  --output reports/pretrained_zero_shot
+```
+
+With the release above, discovery selects the 125 `topcow_mr_*` inputs and ignores the 125
+`topcow_ct_*` inputs. Each prediction is saved separately using the configured label name,
+for example `topcow_mr_055.nii.gz`.
+
+Student prediction accepts one NIfTI, a configured modality directory, or a dataset root.
+Teacher prediction requires either a Lingfeng case directory containing every configured
+modality, a root whose direct child directories are complete cases, or a pattern-directory
+dataset root:
 
 ```bash
 bvs predict \
@@ -234,7 +287,7 @@ Convert the archived KD student checkpoint:
 
 ```bash
 bvs checkpoint convert \
-  --source artifacts/checkpoints/lingfeng/student_best_checkpoint_multimodaltune9.pt \
+  --source artifacts/checkpoints/lingfeng-student_best_checkpoint_multimodaltune9.pt \
   --config configs/reproduction/lingfeng_student_kd_legacy_code.yaml \
   --output artifacts/checkpoints/converted/lingfeng_student_kd_4modal_v1.pt \
   --verify

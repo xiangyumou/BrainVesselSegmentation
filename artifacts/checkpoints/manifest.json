@@ -1,6 +1,6 @@
 {
   "lingfeng_student_transfer": {
-    "filename": "lingfeng/student_best_checkpoint_multimodaltune9.pt",
+    "filename": "lingfeng-student_best_checkpoint_multimodaltune9.pt",
     "purpose": "Initialize the MRA encoder, student decoder, and student metric head.",
     "source": "legacy/source_drop/KD-xia-1/tf_dir/best_KD_model/student_best_checkpoint_multimodaltune9.pt",
     "sha256": "ccecc4b52ffa3832ebf2580945b19e71315f2c26c7f0149f6ecd099ca0997a22",
@@ -23,7 +23,7 @@
   "lingfeng_student_kd_4modal_v1": {
     "filename": "converted/lingfeng_student_kd_4modal_v1.pt",
     "purpose": "Unified schema v1 full Lingfeng model plus restored student projection head.",
-    "source": "lingfeng/student_best_checkpoint_multimodaltune9.pt",
+    "source": "lingfeng-student_best_checkpoint_multimodaltune9.pt",
     "source_sha256": "ccecc4b52ffa3832ebf2580945b19e71315f2c26c7f0149f6ecd099ca0997a22",
     "verification_max_abs_error": 0.0,
     "teacher_projection_restored": false,

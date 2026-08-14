@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from .data.pattern_directory import unpack_pattern_spec
+
 TOP_LEVEL_KEYS = {
     "schema_version",
     "experiment_name",
@@ -275,8 +277,27 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("lingfeng_student_transfer only supports supervised stage")
     if stage in {"teacher", "student_kd"} and model_name != "configurable_lingfeng":
         raise ValueError(f"{stage} requires model.name=configurable_lingfeng")
-    if data.get("adapter") not in {"lingfeng_case_directory", "topcow"}:
-        raise ValueError("data.adapter must be lingfeng_case_directory or topcow")
+    if data.get("adapter") not in {
+        "lingfeng_case_directory",
+        "pattern_directory",
+        "topcow",
+    }:
+        raise ValueError(
+            "data.adapter must be lingfeng_case_directory, pattern_directory, or topcow"
+        )
+    if data.get("adapter") == "pattern_directory":
+        modality_specs = data.get("modalities")
+        if not isinstance(modality_specs, dict) or not modality_specs:
+            raise ValueError(
+                "data.modalities must contain at least one modality for pattern_directory"
+            )
+        if model_name == "standard_unet3d" and len(modality_specs) != 1:
+            raise ValueError(
+                "standard_unet3d requires exactly one data modality for pattern_directory"
+            )
+        for name, spec in modality_specs.items():
+            unpack_pattern_spec(spec, "imagesTr", f"data.modalities.{name}")
+        unpack_pattern_spec(data.get("label", {}), "labelsTr", "data.label")
     for key in ("patch_size", "crop_or_pad_size"):
         if key in data:
             _triple(data[key], f"data.{key}")

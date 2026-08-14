@@ -8,6 +8,9 @@ import nibabel as nib
 import numpy as np
 from skimage.morphology import skeletonize
 
+from .data.pattern_directory import index_pattern_directory, unpack_pattern_spec
+from .data.topcow import topcow_release_root
+
 
 def segmentation_metrics(prediction: np.ndarray, target: np.ndarray) -> dict[str, float]:
     pred = np.asarray(prediction) > 0
@@ -63,8 +66,52 @@ def evaluate_directories(
     label_by_name = {
         path.name: path for path in sorted(label_dir.glob("*.nii.gz"))
     }
+    return _evaluate_indexed(
+        prediction_by_name, label_by_name, output_dir, strict=strict
+    )
+
+
+def evaluate_dataset(
+    predictions: str | Path,
+    data_root: str | Path,
+    config: dict,
+    output: str | Path,
+    *,
+    strict: bool = True,
+) -> dict:
+    adapter = config["data"]["adapter"]
+    if adapter not in {"pattern_directory", "topcow"}:
+        raise ValueError(
+            "Config-driven evaluation requires data.adapter=pattern_directory or topcow"
+        )
+    root = (
+        topcow_release_root(data_root)
+        if adapter == "topcow"
+        else Path(data_root).expanduser().resolve()
+    )
+    directory, pattern = unpack_pattern_spec(
+        config["data"]["label"], "labelsTr", "data.label"
+    )
+    labels = index_pattern_directory(root / directory, pattern)
+    prediction_dir = Path(predictions)
+    prediction_by_name = {
+        path.name: path for path in sorted(prediction_dir.glob("*.nii.gz"))
+    }
+    label_by_name = {path.name: path for path in labels.values()}
+    return _evaluate_indexed(
+        prediction_by_name, label_by_name, Path(output), strict=strict
+    )
+
+
+def _evaluate_indexed(
+    prediction_by_name: dict[str, Path],
+    label_by_name: dict[str, Path],
+    output_dir: Path,
+    *,
+    strict: bool,
+) -> dict:
     if not prediction_by_name:
-        raise FileNotFoundError(f"No .nii.gz predictions found in {prediction_dir}")
+        raise FileNotFoundError("No .nii.gz predictions found")
     prediction_names = set(prediction_by_name)
     label_names = set(label_by_name)
     missing_predictions = sorted(label_names - prediction_names)

@@ -18,7 +18,7 @@ from bvs.models import StandardUNet3D
 
 CHECKPOINT = (
     Path(__file__).resolve().parents[1]
-    / "artifacts/checkpoints/lingfeng/student_best_checkpoint_multimodaltune9.pt"
+    / "artifacts/checkpoints/lingfeng-student_best_checkpoint_multimodaltune9.pt"
 )
 
 

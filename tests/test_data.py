@@ -15,6 +15,7 @@ from bvs.data.topcow import (
 from bvs.data.dataset import (
     MultimodalCase,
     TopCoWPatchDataset,
+    discover_cases,
     discover_lingfeng_cases,
     validate_multimodal_case,
 )
@@ -100,6 +101,37 @@ def test_multimodal_affine_mismatch_is_reported(tmp_path: Path) -> None:
     nib.save(nib.Nifti1Image(np.ones((8, 8, 8)), np.eye(4)), label)
     with pytest.raises(ValueError, match="affine mismatch"):
         validate_multimodal_case(MultimodalCase("case", paths, label))
+
+
+def test_pattern_directory_training_discovery_is_not_topcow_specific(
+    tmp_path: Path,
+) -> None:
+    image = tmp_path / "scans/subject-a_tof.nii.gz"
+    label = tmp_path / "annotations/vessels_subject-a.nii.gz"
+    image.parent.mkdir()
+    label.parent.mkdir()
+    nib.save(nib.Nifti1Image(np.ones((4, 4, 4)), np.eye(4)), image)
+    nib.save(nib.Nifti1Image(np.ones((4, 4, 4)), np.eye(4)), label)
+
+    cases = discover_cases(
+        "pattern_directory",
+        tmp_path,
+        {
+            "tof": {
+                "directory": "scans",
+                "pattern": "{case_id}_tof.nii.gz",
+            }
+        },
+        {
+            "directory": "annotations",
+            "pattern": "vessels_{case_id}.nii.gz",
+        },
+    )
+
+    assert len(cases) == 1
+    assert cases[0].case_id == "subject-a"
+    assert cases[0].modalities == {"tof": image}
+    assert cases[0].label == label
 
 
 def test_preprocess_volume_modes() -> None:

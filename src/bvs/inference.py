@@ -13,6 +13,12 @@ import torch
 from torch.nn import functional as F
 
 from .data.topcow import topcow_release_root
+from .data.pattern_directory import (
+    index_pattern_directory,
+    render_pattern,
+    resolve_input_directory,
+    unpack_pattern_spec,
+)
 from .data.transforms import preprocess_volume
 
 TEACHER_INPUT_ERROR = (
@@ -26,6 +32,7 @@ class InferenceCase:
     case_id: str
     modalities: dict[str, Path]
     reference: Path
+    output_name: str | None = None
 
 
 def _filename(spec: str | dict[str, Any], field: str) -> str:
@@ -120,18 +127,99 @@ def _discover_topcow_inference_cases(
     ]
 
 
+def _pattern_output_name(
+    label_spec: str | dict[str, Any], case_id: str
+) -> str:
+    _, pattern = unpack_pattern_spec(label_spec, "labelsTr", "data.label")
+    return render_pattern(pattern, case_id)
+
+
+def _discover_pattern_student_cases(
+    root: Path,
+    modality: str,
+    modality_spec: str | dict[str, Any],
+    label_spec: str | dict[str, Any],
+) -> list[InferenceCase]:
+    configured_directory, pattern = unpack_pattern_spec(
+        modality_spec, "imagesTr", f"data.modalities.{modality}"
+    )
+    directory = resolve_input_directory(root, configured_directory)
+    indexed = index_pattern_directory(directory, pattern)
+    return [
+        InferenceCase(
+            case_id,
+            {modality: path},
+            path,
+            _pattern_output_name(label_spec, case_id),
+        )
+        for case_id, path in indexed.items()
+    ]
+
+
+def _discover_pattern_teacher_cases(
+    root: Path,
+    modality_specs: dict[str, str | dict[str, Any]],
+    label_spec: str | dict[str, Any],
+) -> list[InferenceCase]:
+    indexed: dict[str, dict[str, Path]] = {}
+    all_ids: set[str] = set()
+    for name, spec in modality_specs.items():
+        configured_directory, pattern = unpack_pattern_spec(
+            spec, "imagesTr", f"data.modalities.{name}"
+        )
+        values = index_pattern_directory(root / configured_directory, pattern)
+        indexed[name] = values
+        all_ids |= set(values)
+    missing = {
+        name: sorted(all_ids - set(values))
+        for name, values in indexed.items()
+        if all_ids - set(values)
+    }
+    if missing:
+        raise FileNotFoundError(f"Pattern modalities are incomplete: {missing}")
+    return [
+        InferenceCase(
+            case_id,
+            {name: values[case_id] for name, values in indexed.items()},
+            next(iter(indexed.values()))[case_id],
+            _pattern_output_name(label_spec, case_id),
+        )
+        for case_id in sorted(all_ids)
+    ]
+
+
 def discover_inference_cases(
     config: dict[str, Any], input_path: str | Path, branch: str
 ) -> list[InferenceCase]:
     source = Path(input_path).expanduser().resolve()
     if branch == "student":
-        modality = str(config["model"].get("student_modality", "image"))
+        data = config["data"]
+        configured_modalities = data.get("modalities", {})
+        modality = config["model"].get("student_modality")
+        if modality is None and len(configured_modalities) == 1:
+            modality = next(iter(configured_modalities))
+        modality = str(modality or "image")
         if source.is_file():
             if not source.name.endswith(".nii.gz"):
                 raise ValueError(f"Input is not a .nii.gz file: {source}")
             return [InferenceCase(source.name.removesuffix(".nii.gz"), {modality: source}, source)]
         if not source.is_dir():
             raise FileNotFoundError(f"Input does not exist: {source}")
+        if (
+            data["adapter"] in {"pattern_directory", "topcow"}
+            and modality in configured_modalities
+        ):
+            pattern_root = (
+                topcow_release_root(source)
+                if data["adapter"] == "topcow"
+                else source
+            )
+            return _discover_pattern_student_cases(
+                pattern_root,
+                modality,
+                configured_modalities[modality],
+                data["label"],
+            )
         files = sorted(source.glob("*.nii.gz"))
         if not files:
             raise FileNotFoundError(f"No NIfTI files found: {source}")
@@ -150,6 +238,10 @@ def discover_inference_cases(
         return _discover_lingfeng_inference_cases(source, data["modalities"])
     if data["adapter"] == "topcow":
         return _discover_topcow_inference_cases(source, data["modalities"])
+    if data["adapter"] == "pattern_directory":
+        return _discover_pattern_teacher_cases(
+            source, data["modalities"], data["label"]
+        )
     raise ValueError(f"Unknown data adapter: {data['adapter']}")
 
 

@@ -15,6 +15,7 @@ from .topcow import (
     binary_label,
     discover_topcow_multimodal_cases,
 )
+from .pattern_directory import discover_pattern_cases
 from .transforms import (
     crop_or_pad_array,
     load_training_arrays,
@@ -87,6 +88,11 @@ def discover_cases(
             for case_id, modalities, label in discover_topcow_multimodal_cases(
                 root, modality_specs, label_spec
             )
+        ]
+    if adapter == "pattern_directory":
+        return [
+            MultimodalCase(case.case_id, case.modalities, case.label)
+            for case in discover_pattern_cases(root, modality_specs, label_spec)
         ]
     raise ValueError(f"Unknown data adapter: {adapter}")
 

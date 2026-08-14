@@ -12,7 +12,7 @@ model:
   num_classes: 2
   base_channels: 16
 data:
-  adapter: topcow
+  adapter: pattern_directory
   root: null
   train_root: null
   val_root: null

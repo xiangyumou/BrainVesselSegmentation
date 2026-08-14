@@ -95,9 +95,8 @@ def test_synthetic_train_predict_evaluate(tmp_path: Path) -> None:
         config, data_root / "imagesTr", branch="student"
     )
     for case in cases:
-        destination = predictions / case.reference.name.replace(
-            "_0000.nii.gz", ".nii.gz"
-        )
+        assert case.output_name is not None
+        destination = predictions / case.output_name
         predict_case(
             model,
             case,

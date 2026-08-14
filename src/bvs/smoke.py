@@ -19,7 +19,7 @@ from .training.losses import CombinedSegmentationLoss, MetricContrastiveLoss, Te
 
 def run_smoke_test(
     requested_device: str = "auto",
-    checkpoint: str | Path = "artifacts/checkpoints/lingfeng/student_best_checkpoint_multimodaltune9.pt",
+    checkpoint: str | Path = "artifacts/checkpoints/lingfeng-student_best_checkpoint_multimodaltune9.pt",
     output: str | Path | None = None,
     config_path: str | Path | None = None,
 ) -> dict:

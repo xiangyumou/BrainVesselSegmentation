@@ -50,6 +50,19 @@ def test_inference_overlap_must_be_smaller_than_window() -> None:
         validate_config(config)
 
 
+def test_pattern_directory_requires_case_id_placeholder() -> None:
+    config = _config()
+    config["data"]["modalities"]["mra"]["pattern"] = "mra.nii.gz"
+    with pytest.raises(ValueError, match="case_id"):
+        validate_config(config)
+
+
+def test_topcow_adapter_remains_supported() -> None:
+    config = _config()
+    config["data"]["adapter"] = "topcow"
+    assert validate_config(config)["data"]["adapter"] == "topcow"
+
+
 @pytest.mark.parametrize(
     "field",
     ["sampler", "queue_length", "patch_overlap", "test_root"],

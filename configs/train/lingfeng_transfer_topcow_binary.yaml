@@ -11,14 +11,14 @@ model:
   in_channels: {mra: 1}
   num_classes: 2
   base_channels: 16
-  pretrained_checkpoint: artifacts/checkpoints/lingfeng/student_best_checkpoint_multimodaltune9.pt
+  pretrained_checkpoint: artifacts/checkpoints/lingfeng-student_best_checkpoint_multimodaltune9.pt
   freeze_encoder: false
 data:
-  adapter: topcow
+  adapter: pattern_directory
   root: null
   train_root: null
   val_root: null
-  split_file: configs/splits/topcow_binary_seed42.json
+  split_file: configs/splits/topcow2024_release_seed42.json
   modalities:
     mra:
       directory: imagesTr

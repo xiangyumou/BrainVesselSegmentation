@@ -13,7 +13,7 @@ from .checkpoints import (
 from .config import load_config
 from .data.topcow import create_fixed_split, discover_topcow_cases, validate_topcow_dataset
 from .devices import select_device
-from .evaluation import evaluate_directories
+from .evaluation import evaluate_dataset, evaluate_directories
 from .inference import discover_inference_cases, predict_case
 from .smoke import run_smoke_test
 from .training.trainer import train_from_config
@@ -59,7 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     evaluate = commands.add_parser("evaluate")
     evaluate.add_argument("--predictions", required=True)
-    evaluate.add_argument("--labels", required=True)
+    evaluate_source = evaluate.add_mutually_exclusive_group(required=True)
+    evaluate_source.add_argument("--labels")
+    evaluate_source.add_argument("--data-root")
+    evaluate.add_argument("--config")
     evaluate.add_argument("--output", required=True)
     evaluate.add_argument("--allow-partial", action="store_true")
 
@@ -68,7 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     smoke.add_argument("--device", default="auto")
     smoke.add_argument(
         "--checkpoint",
-        default="artifacts/checkpoints/lingfeng/student_best_checkpoint_multimodaltune9.pt",
+        default="artifacts/checkpoints/lingfeng-student_best_checkpoint_multimodaltune9.pt",
     )
     smoke.add_argument("--output")
     return parser
@@ -109,6 +112,8 @@ def main(argv: list[str] | None = None) -> int:
         for case in cases:
             if input_path.is_file():
                 destination = output_path
+            elif case.output_name:
+                destination = output_path / case.output_name
             elif branch == "teacher":
                 destination = output_path / f"{case.case_id}.nii.gz"
             else:
@@ -132,14 +137,27 @@ def main(argv: list[str] | None = None) -> int:
             )
         _print({"device": policy.device.type, "predictions": outputs})
     elif args.command == "evaluate":
-        _print(
-            evaluate_directories(
-                args.predictions,
-                args.labels,
-                args.output,
-                strict=not args.allow_partial,
+        if args.data_root:
+            if not args.config:
+                raise SystemExit("--config is required with --data-root")
+            _print(
+                evaluate_dataset(
+                    args.predictions,
+                    args.data_root,
+                    load_config(args.config),
+                    args.output,
+                    strict=not args.allow_partial,
+                )
             )
-        )
+        else:
+            _print(
+                evaluate_directories(
+                    args.predictions,
+                    args.labels,
+                    args.output,
+                    strict=not args.allow_partial,
+                )
+            )
     elif args.command == "smoke-test":
         _print(
             run_smoke_test(

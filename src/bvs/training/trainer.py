@@ -20,7 +20,7 @@ from torch.utils.tensorboard import SummaryWriter
 from ..checkpoints import make_unified_checkpoint
 from ..config import model_spec_from_config, project_path, resolve_data_root
 from ..data.dataset import MultimodalPatchDataset, TopCoWPatchDataset, discover_cases
-from ..data.topcow import cases_by_id, discover_topcow_cases
+from ..data.topcow import TopCoWCase, cases_by_id, discover_topcow_cases
 from ..devices import seed_everything, select_device
 from ..evaluation import segmentation_metrics
 from ..inference import InferenceCase, load_inference_case, sliding_window_inference
@@ -102,7 +102,21 @@ def _loaders(config: dict[str, Any]) -> tuple[DataLoader, list[Any]]:
     if config["model"]["name"] == "standard_unet3d":
         root = resolve_data_root(config)
         split = _load_split(config)
-        indexed = cases_by_id(discover_topcow_cases(root))
+        if data["adapter"] == "pattern_directory":
+            generic_cases = discover_cases(
+                data["adapter"], root, data["modalities"], data["label"]
+            )
+            modality = next(iter(data["modalities"]))
+            indexed = cases_by_id(
+                [
+                    TopCoWCase(
+                        case.case_id, case.modalities[modality], case.label
+                    )
+                    for case in generic_cases
+                ]
+            )
+        else:
+            indexed = cases_by_id(discover_topcow_cases(root))
         missing = sorted((set(split["train"]) | set(split["val"])) - set(indexed))
         if missing:
             raise ValueError(f"Split references missing cases: {missing}")

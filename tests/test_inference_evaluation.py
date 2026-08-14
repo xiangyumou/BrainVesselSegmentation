@@ -7,7 +7,8 @@ import numpy as np
 import torch
 import pytest
 
-from bvs.evaluation import evaluate_directories, segmentation_metrics
+from bvs.cli import build_parser, main
+from bvs.evaluation import evaluate_dataset, evaluate_directories, segmentation_metrics
 from bvs.inference import (
     TEACHER_INPUT_ERROR,
     discover_inference_cases,
@@ -119,6 +120,46 @@ def _write_mask(path: Path) -> None:
     )
 
 
+def test_pattern_student_discovery_filters_other_modalities(tmp_path: Path) -> None:
+    images = tmp_path / "images"
+    for name in (
+        "scan_mra_subject-a.nii.gz",
+        "scan_mra_subject-b.nii.gz",
+        "scan_cta_subject-a.nii.gz",
+    ):
+        _write_mask(images / name)
+    config = {
+        "model": {"student_modality": "mra"},
+        "data": {
+            "adapter": "pattern_directory",
+            "modalities": {
+                "mra": {
+                    "directory": "images",
+                    "pattern": "scan_mra_{case_id}.nii.gz",
+                }
+            },
+            "label": {
+                "directory": "labels",
+                "pattern": "truth_{case_id}.nii.gz",
+            },
+        },
+    }
+
+    from_root = discover_inference_cases(config, tmp_path, "student")
+    from_directory = discover_inference_cases(config, images, "student")
+
+    assert [case.case_id for case in from_root] == ["subject-a", "subject-b"]
+    assert [case.case_id for case in from_directory] == [
+        "subject-a",
+        "subject-b",
+    ]
+    assert [case.output_name for case in from_root] == [
+        "truth_subject-a.nii.gz",
+        "truth_subject-b.nii.gz",
+    ]
+    assert all("cta" not in case.reference.name for case in from_root)
+
+
 def test_evaluation_rejects_missing_predictions_by_default(tmp_path: Path) -> None:
     predictions = tmp_path / "predictions"
     labels = tmp_path / "labels"
@@ -158,3 +199,58 @@ def test_partial_evaluation_reports_case_set_differences(tmp_path: Path) -> None
     assert report["label_case_count"] == 2
     assert report["missing_predictions"] == ["missing.nii.gz"]
     assert report["unexpected_predictions"] == ["unexpected.nii.gz"]
+
+
+def test_configured_evaluation_filters_labels_by_pattern(tmp_path: Path) -> None:
+    predictions = tmp_path / "predictions"
+    labels = tmp_path / "dataset" / "annotations"
+    _write_mask(predictions / "truth_subject-a.nii.gz")
+    _write_mask(labels / "truth_subject-a.nii.gz")
+    _write_mask(labels / "unrelated_subject-a.nii.gz")
+    config = {
+        "data": {
+            "adapter": "pattern_directory",
+            "label": {
+                "directory": "annotations",
+                "pattern": "truth_{case_id}.nii.gz",
+            },
+        }
+    }
+
+    report = evaluate_dataset(
+        predictions, tmp_path / "dataset", config, tmp_path / "output"
+    )
+
+    assert report["case_count"] == 1
+    assert report["label_case_count"] == 1
+    assert report["prediction_case_count"] == 1
+
+
+def test_evaluate_cli_requires_config_with_data_root() -> None:
+    args = build_parser().parse_args(
+        [
+            "evaluate",
+            "--config",
+            "config.yaml",
+            "--predictions",
+            "predictions",
+            "--data-root",
+            "dataset",
+            "--output",
+            "report",
+        ]
+    )
+    assert args.config == "config.yaml"
+    assert args.data_root == "dataset"
+    with pytest.raises(SystemExit, match="--config is required"):
+        main(
+            [
+                "evaluate",
+                "--predictions",
+                "predictions",
+                "--data-root",
+                "dataset",
+                "--output",
+                "report",
+            ]
+        )
