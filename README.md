@@ -135,6 +135,19 @@ bvs train --config configs/train/unet3d_topcow_binary.yaml
 bvs train --config configs/train/lingfeng_transfer_topcow_binary.yaml
 ```
 
+To continue the newest run whose complete resolved configuration is identical, use:
+
+```bash
+bvs train --config configs/train/lingfeng_transfer_topcow_binary.yaml --c
+```
+
+`--c` (also available as `-c` or `--continue`) restores `latest.pt` in place and appends
+the existing CSV and TensorBoard history. It refuses to resume when any resolved parameter
+differs or when no complete `latest.pt` exists. Without `--c`, training always creates a new
+timestamped run directory and never overwrites an earlier run. A manual
+`training.resume_checkpoint` remains available for starting a new run from an explicitly
+selected checkpoint and cannot be combined with `--c`.
+
 Both configurations use Adam, StepLR, CE + Dice loss, deterministic label-aware patch
 sampling, and whole-volume sliding-window validation after every epoch. The transfer profile
 supports `model.freeze_encoder: true`; when enabled, only the student decoder and metric head

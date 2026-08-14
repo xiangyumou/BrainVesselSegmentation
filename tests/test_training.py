@@ -4,7 +4,10 @@ from pathlib import Path
 
 import torch
 import pytest
+import yaml
 
+from bvs.cli import build_parser
+from bvs.config import load_config
 from bvs.models import ConfigurableLingfengModel, StandardUNet3D
 from bvs.training.losses import (
     CombinedSegmentationLoss,
@@ -13,7 +16,47 @@ from bvs.training.losses import (
     TemperatureKLLoss,
 )
 from bvs.training.stages import build_stage
-from bvs.training.trainer import _resume, _run_epoch, validation_improved
+from bvs.training.trainer import (
+    _resume,
+    _run_epoch,
+    find_continue_run,
+    validation_improved,
+)
+
+
+def test_train_continue_cli_aliases() -> None:
+    parser = build_parser()
+    for option in ("-c", "--c", "--continue"):
+        args = parser.parse_args(["train", "--config", "config.yaml", option])
+        assert args.continue_run is True
+
+
+def test_continue_selects_newest_identical_run(tmp_path: Path) -> None:
+    config = load_config(
+        Path(__file__).resolve().parents[1]
+        / "configs/train/unet3d_topcow_binary.yaml"
+    )
+    config["output_root"] = str(tmp_path / "runs")
+    experiment_root = Path(config["output_root"]) / config["experiment_name"]
+    clean = {key: value for key, value in config.items() if key != "_config_path"}
+    expected = None
+    for timestamp in ("20260101-000000", "20260102-000000"):
+        run = experiment_root / timestamp
+        (run / "checkpoints").mkdir(parents=True)
+        (run / "resolved_config.yaml").write_text(
+            yaml.safe_dump(clean, sort_keys=False), encoding="utf-8"
+        )
+        expected = run
+        (run / "checkpoints/latest.pt").touch()
+
+    assert expected is not None
+    run, checkpoint = find_continue_run(config)
+    assert run == expected
+    assert checkpoint == expected / "checkpoints/latest.pt"
+
+    config["training"]["batch_size"] += 1
+    with pytest.raises(FileNotFoundError, match="identical resolved configuration"):
+        find_continue_run(config)
 
 
 def test_single_training_and_validation_step() -> None:

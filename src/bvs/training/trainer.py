@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import copy
 import json
 import platform
 import random
@@ -25,6 +26,66 @@ from ..devices import seed_everything, select_device
 from ..evaluation import segmentation_metrics
 from ..inference import InferenceCase, load_inference_case, sliding_window_inference
 from .stages import StageRuntime, build_stage
+
+
+def _clean_config(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: copy.deepcopy(value)
+        for key, value in config.items()
+        if key != "_config_path"
+    }
+
+
+def _config_for_continue(config: dict[str, Any]) -> dict[str, Any]:
+    comparable = _clean_config(config)
+    comparable.setdefault("training", {})["resume_checkpoint"] = None
+    return comparable
+
+
+def find_continue_run(config: dict[str, Any]) -> tuple[Path, Path]:
+    """Return the newest run whose saved configuration exactly matches config."""
+    if config["training"].get("resume_checkpoint"):
+        raise ValueError(
+            "--continue cannot be combined with training.resume_checkpoint"
+        )
+    experiment_root = (
+        project_path(config, config["output_root"]) / str(config["experiment_name"])
+    )
+    requested = _config_for_continue(config)
+    if experiment_root.is_dir():
+        for run_dir in sorted(experiment_root.iterdir(), reverse=True):
+            saved_config = run_dir / "resolved_config.yaml"
+            latest = run_dir / "checkpoints/latest.pt"
+            if (
+                not run_dir.is_dir()
+                or not saved_config.is_file()
+                or not latest.is_file()
+            ):
+                continue
+            saved = yaml.safe_load(saved_config.read_text(encoding="utf-8"))
+            if isinstance(saved, dict) and _config_for_continue(saved) == requested:
+                return run_dir, latest
+    raise FileNotFoundError(
+        "No previous run with an identical resolved configuration and latest.pt "
+        f"was found under {experiment_root}"
+    )
+
+
+def _load_history(path: Path) -> list[dict[str, float | int]]:
+    if not path.is_file():
+        return []
+    with path.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    history: list[dict[str, float | int]] = []
+    for raw in rows:
+        history.append(
+            {
+                key: int(value) if key in {"epoch", "is_best"} else float(value)
+                for key, value in raw.items()
+                if value is not None and value != ""
+            }
+        )
+    return history
 
 
 def build_model(config: dict[str, Any]) -> torch.nn.Module:
@@ -438,7 +499,15 @@ def _resume(
     )
 
 
-def train_from_config(config: dict[str, Any]) -> Path:
+def train_from_config(
+    config: dict[str, Any], *, continue_run: bool = False
+) -> Path:
+    clean_config = _clean_config(config)
+    continued_run: Path | None = None
+    if continue_run:
+        continued_run, resume_checkpoint = find_continue_run(config)
+        config = copy.deepcopy(config)
+        config["training"]["resume_checkpoint"] = str(resume_checkpoint)
     seed_everything(int(config["seed"]))
     policy = select_device(str(config["device"]))
     train_loader, val_cases = _loaders(config)
@@ -468,16 +537,15 @@ def train_from_config(config: dict[str, Any]) -> Path:
     )
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_dir = (
+    run_dir = continued_run or (
         project_path(config, config["output_root"])
         / str(config["experiment_name"])
         / timestamp
     )
     checkpoint_dir = run_dir / "checkpoints"
     metrics_dir = run_dir / "metrics"
-    checkpoint_dir.mkdir(parents=True)
-    metrics_dir.mkdir()
-    clean_config = {key: value for key, value in config.items() if key != "_config_path"}
+    checkpoint_dir.mkdir(parents=True, exist_ok=continue_run)
+    metrics_dir.mkdir(exist_ok=continue_run)
     (run_dir / "resolved_config.yaml").write_text(
         yaml.safe_dump(clean_config, sort_keys=False), encoding="utf-8"
     )
@@ -498,7 +566,7 @@ def train_from_config(config: dict[str, Any]) -> Path:
     )
     writer = SummaryWriter(str(run_dir / "tensorboard"))
     history_path = metrics_dir / "history.csv"
-    history: list[dict[str, float | int]] = []
+    history = _load_history(history_path) if continue_run else []
     max_epochs = int(training["epochs"])
     accumulation = int(training["gradient_accumulation"])
     gradient_clip = training["gradient_clip_norm"]

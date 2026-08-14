@@ -49,6 +49,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     train = commands.add_parser("train")
     train.add_argument("--config", required=True)
+    train.add_argument(
+        "-c",
+        "--c",
+        "--continue",
+        dest="continue_run",
+        action="store_true",
+        help="continue the newest run with an identical resolved configuration",
+    )
 
     predict = commands.add_parser("predict")
     predict.add_argument("--config", required=True)
@@ -98,7 +106,13 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif args.command == "train":
         config = load_config(args.config)
-        _print({"run_directory": str(train_from_config(config))})
+        _print(
+            {
+                "run_directory": str(
+                    train_from_config(config, continue_run=args.continue_run)
+                )
+            }
+        )
     elif args.command == "predict":
         config = load_config(args.config)
         policy = select_device(args.device)
