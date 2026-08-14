@@ -3,6 +3,10 @@
 Maintainable training, inference, and evaluation code for binary vessel segmentation on
 TopCoW 2024 MRA. All non-zero CoW anatomy labels are merged into one foreground class.
 
+An independent [nnU-Net baseline](nnunet/README.md) preserves this implementation
+and adds separate from-scratch Lingfeng teacher, supervised student, and
+teacher-to-student KD workflows on nnU-Net v2.
+
 This is a cross-dataset transfer experiment. The archived Lingfeng work targets whole-brain
 TOF-MRA vessel segmentation, while TopCoW labels the Circle of Willis; its reported Dice
 scores are therefore not directly comparable with this project.

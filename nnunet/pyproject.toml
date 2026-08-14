@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bvs-nnunet"
+version = "0.1.0"
+description = "Independent nnU-Net v2 baseline for Lingfeng brain vessel segmentation"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  "brain-vessel-segmentation==0.1.0",
+  "nnunetv2==2.8.1",
+]
+
+[project.optional-dependencies]
+test = ["pytest==8.3.5"]
+
+[project.scripts]
+bvs-nnunet-prepare = "bvs_nnunet.dataset:main"
+bvs-nnunet-export-student = "bvs_nnunet.export_student:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
