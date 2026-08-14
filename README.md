@@ -58,10 +58,14 @@ The global default random seed is `42`.
 
 ## Data
 
-Point `BVS_DATA_ROOT` at the release directory configured by the training profiles:
+The project uses an immutable LFModel data workspace. See the bilingual
+[data workspace and CTA-to-MRA registration guide](docs/data_workspace_and_registration.md)
+for staging, provenance verification, registration, recovery, and QC acceptance commands.
+
+The TopCoW training profiles use this staged release directory:
 
 ```text
-TopCoW2024_Data_Release/       # BVS_DATA_ROOT
+/home/user/xiangyu/st/LFModel/raw/Dataset001_BrainVesselSegmentation/
 ├── imagesTr/
 │   ├── topcow_mr_{case_id}_0000.nii.gz
 │   └── topcow_ct_{case_id}_0000.nii.gz
@@ -73,7 +77,7 @@ TopCoW2024_Data_Release/       # BVS_DATA_ROOT
 Validate all 125 paired TopCoW MRA cases and generate the fixed 80/20/25 split:
 
 ```bash
-export BVS_DATA_ROOT=/path/to/TopCoW2024_Data_Release
+export BVS_DATA_ROOT=/home/user/xiangyu/st/LFModel/raw/Dataset001_BrainVesselSegmentation
 bvs data validate --data-root "$BVS_DATA_ROOT"
 bvs data split --data-root "$BVS_DATA_ROOT" \
   --output configs/splits/topcow2024_release_seed42.json
@@ -168,8 +172,8 @@ sbatch dicc/scripts/train_lingfeng_scratch_topcow.sh
 ```
 
 The job requests one A100 GPU, 4 CPU cores, and 32 GB RAM, while leaving the time limit to
-the cluster default. It uses the `mu` Conda environment directly, sets the local TopCoW
-release as `BVS_DATA_ROOT`, and always passes
+the cluster default. It uses the `mu` Conda environment directly, sets the staged LFModel
+raw copy as `BVS_DATA_ROOT`, and always passes
 `--c`: a compatible interrupted run resumes in place, while the first submission starts a
 new run using the selected configuration. Slurm stdout and stderr are written under `dicc/logs/`.
 Both streams are merged into one `bvs-topcow-ft_<job-id>.log` or

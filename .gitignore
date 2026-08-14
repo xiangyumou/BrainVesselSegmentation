@@ -17,6 +17,9 @@ build/
 /predictions/
 /reports/
 /docs/
+!/docs/
+/docs/*
+!/docs/data_workspace_and_registration.md
 /dicc/*
 !/dicc/scripts/
 !/dicc/scripts/**

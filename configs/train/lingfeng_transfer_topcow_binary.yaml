@@ -15,7 +15,7 @@ model:
   freeze_encoder: false
 data:
   adapter: pattern_directory
-  root: null
+  root: /home/user/xiangyu/st/LFModel/raw/Dataset001_BrainVesselSegmentation
   train_root: null
   val_root: null
   split_file: configs/splits/topcow2024_release_seed42.json

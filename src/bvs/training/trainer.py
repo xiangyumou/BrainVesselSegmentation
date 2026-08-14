@@ -159,6 +159,55 @@ def _multimodal_dataset(
     )
 
 
+def _require_complete_registration_qc(config: dict[str, Any]) -> None:
+    if config["stage"] not in {"teacher", "student_kd"}:
+        return
+    cta_spec = config["data"].get("modalities", {}).get("cta")
+    if not isinstance(cta_spec, dict):
+        return
+    directory_value = cta_spec.get("directory")
+    if not directory_value or "cta_registered_to_mra" not in str(directory_value):
+        return
+    cta_directory = Path(str(directory_value)).expanduser()
+    if not cta_directory.is_absolute():
+        cta_directory = resolve_data_root(config) / cta_directory
+    summary_path = cta_directory.resolve().parent / "qc" / "summary.json"
+    if not summary_path.is_file():
+        raise RuntimeError(
+            f"Teacher/KD training requires registration QC summary: {summary_path}"
+        )
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Registration QC summary is unreadable: {summary_path}") from error
+    split = _load_split(config)
+    expected_ids = {
+        str(case_id)
+        for key in ("train", "val", "internal_test")
+        for case_id in split.get(key, [])
+    }
+    successful_ids = {
+        str(record.get("case_id"))
+        for record in summary.get("cases", [])
+        if record.get("status") == "success"
+    }
+    failed = int(summary.get("failed", -1))
+    if failed != 0 or successful_ids != expected_ids:
+        missing = sorted(expected_ids - successful_ids)
+        unexpected = sorted(successful_ids - expected_ids)
+        missing_preview = missing[:10] + (
+            [f"... ({len(missing)} total)"] if len(missing) > 10 else []
+        )
+        unexpected_preview = unexpected[:10] + (
+            [f"... ({len(unexpected)} total)"] if len(unexpected) > 10 else []
+        )
+        raise RuntimeError(
+            "Teacher/KD training is blocked until registration QC passes for the "
+            f"complete split: expected={len(expected_ids)}, successful={len(successful_ids)}, "
+            f"failed={failed}, missing={missing_preview}, unexpected={unexpected_preview}"
+        )
+
+
 def _seed_worker(worker_id: int) -> None:
     worker_seed = torch.initial_seed() % 2**32
     random.seed(worker_seed)
@@ -167,6 +216,7 @@ def _seed_worker(worker_id: int) -> None:
 
 def _loaders(config: dict[str, Any]) -> tuple[DataLoader, list[Any]]:
     data = config["data"]
+    _require_complete_registration_qc(config)
     batch_size = int(config["training"]["batch_size"])
     workers = int(data.get("num_workers", 0))
     if config["model"]["name"] == "standard_unet3d":

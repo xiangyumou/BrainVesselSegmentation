@@ -15,7 +15,7 @@ set -euo pipefail
 project_root=/home/user/xiangyu/Projects/BrainVesselSegmentation
 bvs_command=/home/user/xiangyu/.conda/envs/mu/bin/bvs
 config="${BVS_CONFIG:-configs/train/lingfeng_transfer_topcow_binary.yaml}"
-export BVS_DATA_ROOT="${BVS_DATA_ROOT:-/home/user/xiangyu/st/datasets/TopCoW/TopCoW2024_Data_Release}"
+export BVS_DATA_ROOT=/home/user/xiangyu/st/LFModel/raw/Dataset001_BrainVesselSegmentation
 export PYTHONUNBUFFERED=1
 
 if [[ "$config" = /* ]]; then
