@@ -55,7 +55,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--continue",
         dest="continue_run",
         action="store_true",
-        help="continue the newest run with an identical resolved configuration",
+        help=(
+            "continue the newest run with an identical resolved configuration, "
+            "or start a new run when none exists"
+        ),
     )
 
     predict = commands.add_parser("predict")

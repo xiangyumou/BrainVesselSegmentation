@@ -17,7 +17,12 @@ build/
 /predictions/
 /reports/
 /docs/
-/dicc/
+/dicc/*
+!/dicc/scripts/
+!/dicc/scripts/**
+!/dicc/logs/
+/dicc/logs/*
+!/dicc/logs/.gitkeep
 /legacy/
 
 # Model weights and medical images

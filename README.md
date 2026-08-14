@@ -142,16 +142,38 @@ bvs train --config configs/train/lingfeng_transfer_topcow_binary.yaml --c
 ```
 
 `--c` (also available as `-c` or `--continue`) restores `latest.pt` in place and appends
-the existing CSV and TensorBoard history. It refuses to resume when any resolved parameter
-differs or when no complete `latest.pt` exists. Without `--c`, training always creates a new
-timestamped run directory and never overwrites an earlier run. A manual
+the existing CSV and TensorBoard history. Only a run with an identical resolved configuration
+is eligible. If no eligible `latest.pt` exists, `--c` safely starts a new timestamped run from
+the configured initialization. For the Lingfeng transfer profile, that means a new fine-tune
+from the archived pretrained weights rather than random model initialization. Without `--c`,
+training always creates a new timestamped run and never overwrites an earlier run. A manual
 `training.resume_checkpoint` remains available for starting a new run from an explicitly
 selected checkpoint and cannot be combined with `--c`.
+
+### DICC Slurm
+
+Submit the Lingfeng TopCoW fine-tuning job from the repository root:
+
+```bash
+sbatch dicc/scripts/train_lingfeng_transfer_topcow.sh
+```
+
+The job requests one A100 GPU, 4 CPU cores, 32 GB RAM, and 24 hours. It uses the `mu` Conda
+environment directly, sets the local TopCoW release as `BVS_DATA_ROOT`, and always passes
+`--c`: a compatible interrupted run resumes in place, while the first submission starts a
+new fine-tuning run. Slurm stdout and stderr are written under `dicc/logs/`.
+Both streams are merged into one `bvs-topcow-ft_<job-id>.log` file so initialization,
+progress, warnings, and errors remain in chronological order.
 
 Both configurations use Adam, StepLR, CE + Dice loss, deterministic label-aware patch
 sampling, and whole-volume sliding-window validation after every epoch. The transfer profile
 supports `model.freeze_encoder: true`; when enabled, only the student decoder and metric head
 are optimized.
+
+Training logs initialization, device selection, data and model discovery, batch progress at
+5% intervals, every full-volume validation case, epoch metrics, checkpoint writes, resume
+state, and early stopping to the terminal in real time. The final JSON result remains on
+standard output so it can still be consumed by scripts.
 
 `best.pt` and early stopping use a deterministic lexicographic rule: mean validation Dice,
 then mean clDice when Dice differs by at most `1e-6`, then validation loss when both metrics

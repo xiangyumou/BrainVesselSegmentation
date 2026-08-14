@@ -67,7 +67,8 @@ def test_synthetic_train_predict_evaluate(tmp_path: Path) -> None:
     config["inference"]["overlap"] = [0, 0, 0]
     config["inference"]["compatibility_mode"] = "gaussian"
 
-    run_dir = train_from_config(config)
+    # --continue is also safe for the first invocation: it starts a new run.
+    run_dir = train_from_config(config, continue_run=True)
     checkpoint = run_dir / "checkpoints/best.pt"
     history = run_dir / "metrics/history.csv"
     summary = run_dir / "metrics/summary.json"

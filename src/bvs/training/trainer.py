@@ -28,6 +28,11 @@ from ..inference import InferenceCase, load_inference_case, sliding_window_infer
 from .stages import StageRuntime, build_stage
 
 
+def _log(message: str) -> None:
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {message}", file=sys.stderr, flush=True)
+
+
 def _clean_config(config: dict[str, Any]) -> dict[str, Any]:
     return {
         key: copy.deepcopy(value)
@@ -228,6 +233,7 @@ def _run_epoch(
     accumulation_steps: int,
     amp_enabled: bool,
     gradient_clip_norm: float | None,
+    show_progress: bool = False,
 ) -> dict[str, float]:
     training = optimizer is not None
     runtime.train(training)
@@ -235,6 +241,7 @@ def _run_epoch(
     if training:
         optimizer.zero_grad(set_to_none=True)
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+    progress_interval = max(1, len(loader) // 20)
     for step, raw_batch in enumerate(loader):
         batch = _move_batch(raw_batch, device)
         amp_context = (
@@ -266,6 +273,17 @@ def _run_epoch(
         totals["loss"] += float(loss.detach().cpu())
         for name, value in components.items():
             totals[name] = totals.get(name, 0.0) + value
+        completed = step + 1
+        if show_progress and (
+            completed == 1
+            or completed == len(loader)
+            or completed % progress_interval == 0
+        ):
+            _log(
+                f"Training batch {completed}/{len(loader)} "
+                f"({100.0 * completed / len(loader):.0f}%), "
+                f"mean loss={totals['loss'] / completed:.6f}"
+            )
     if not len(loader):
         raise RuntimeError("DataLoader contains no batches")
     return {name: value / len(loader) for name, value in totals.items()}
@@ -354,8 +372,11 @@ def validate_full_volumes(
     metric_rows: list[dict[str, float]] = []
     losses: list[float] = []
     try:
-        for raw_case in cases:
+        for case_index, raw_case in enumerate(cases, start=1):
             case, label_path = _validation_case(raw_case, config)
+            _log(
+                f"Validating case {case_index}/{len(cases)}: {case.case_id}"
+            )
             tensors, _ = load_inference_case(
                 case, str(config["data"]["normalization"])
             )
@@ -391,6 +412,11 @@ def validate_full_volumes(
                 segmentation_metrics(
                     prediction, label.squeeze(0).cpu().numpy()
                 )
+            )
+            _log(
+                f"Validated case {case.case_id}: "
+                f"Dice={metric_rows[-1]['dice']:.6f}, "
+                f"clDice={metric_rows[-1]['cldice']:.6f}"
             )
     finally:
         runtime.train(was_training)
@@ -502,16 +528,53 @@ def _resume(
 def train_from_config(
     config: dict[str, Any], *, continue_run: bool = False
 ) -> Path:
+    _log(
+        f"Starting experiment '{config['experiment_name']}' "
+        f"(stage={config['stage']}, continue={continue_run})"
+    )
     clean_config = _clean_config(config)
     continued_run: Path | None = None
     if continue_run:
-        continued_run, resume_checkpoint = find_continue_run(config)
-        config = copy.deepcopy(config)
-        config["training"]["resume_checkpoint"] = str(resume_checkpoint)
+        _log("Searching for the newest run with an identical resolved configuration")
+        try:
+            continued_run, resume_checkpoint = find_continue_run(config)
+        except FileNotFoundError:
+            _log(
+                "No compatible latest.pt was found; starting a new run from "
+                "the configured initialization"
+            )
+        else:
+            _log(f"Found continuation checkpoint: {resume_checkpoint}")
+            config = copy.deepcopy(config)
+            config["training"]["resume_checkpoint"] = str(resume_checkpoint)
     seed_everything(int(config["seed"]))
     policy = select_device(str(config["device"]))
+    device_description = policy.device.type
+    if policy.device.type == "cuda":
+        device_description = f"cuda ({torch.cuda.get_device_name(policy.device)})"
+    _log(
+        f"Environment ready: torch={torch.__version__}, device={device_description}, "
+        f"AMP available={policy.amp_enabled}, seed={config['seed']}"
+    )
+    _log(f"Discovering data under {resolve_data_root(config)}")
     train_loader, val_cases = _loaders(config)
+    train_cases = len(getattr(train_loader.dataset, "cases", []))
+    _log(
+        f"Data ready: train cases={train_cases}, validation cases={len(val_cases)}, "
+        f"batches per epoch={len(train_loader)}"
+    )
+    model_config = config["model"]
+    if model_config.get("pretrained_checkpoint"):
+        _log(
+            "Loading pretrained checkpoint: "
+            f"{project_path(config, model_config['pretrained_checkpoint'])}"
+        )
+    _log(f"Building model '{model_config['name']}'")
     runtime = build_stage(config, policy.device)
+    trainable_parameters = sum(
+        parameter.numel() for parameter in runtime.trainable_parameters
+    )
+    _log(f"Model ready: trainable parameters={trainable_parameters:,}")
     training = config["training"]
     if training["optimizer"] != "adam":
         raise ValueError("Only optimizer=adam is currently supported")
@@ -531,6 +594,11 @@ def train_from_config(
     start_epoch, best_loss, best_dice, best_cldice, best_epoch, stale_epochs = _resume(
         runtime, optimizer, scheduler, config
     )
+    if start_epoch:
+        _log(
+            f"Resume state restored at epoch {start_epoch}: "
+            f"best epoch={best_epoch}, best Dice={best_dice}"
+        )
     resume_value = training.get("resume_checkpoint")
     resume_path = (
         str(project_path(config, resume_value)) if resume_value else None
@@ -542,10 +610,12 @@ def train_from_config(
         / str(config["experiment_name"])
         / timestamp
     )
+    resuming_in_place = continued_run is not None
     checkpoint_dir = run_dir / "checkpoints"
     metrics_dir = run_dir / "metrics"
-    checkpoint_dir.mkdir(parents=True, exist_ok=continue_run)
-    metrics_dir.mkdir(exist_ok=continue_run)
+    checkpoint_dir.mkdir(parents=True, exist_ok=resuming_in_place)
+    metrics_dir.mkdir(exist_ok=resuming_in_place)
+    _log(f"Run directory: {run_dir}")
     (run_dir / "resolved_config.yaml").write_text(
         yaml.safe_dump(clean_config, sort_keys=False), encoding="utf-8"
     )
@@ -566,13 +636,24 @@ def train_from_config(
     )
     writer = SummaryWriter(str(run_dir / "tensorboard"))
     history_path = metrics_dir / "history.csv"
-    history = _load_history(history_path) if continue_run else []
+    history = _load_history(history_path) if resuming_in_place else []
     max_epochs = int(training["epochs"])
     accumulation = int(training["gradient_accumulation"])
     gradient_clip = training["gradient_clip_norm"]
     gradient_clip = float(gradient_clip) if gradient_clip is not None else None
+    amp_enabled = policy.amp_enabled and str(training["amp"]).lower() not in {
+        "false",
+        "0",
+    }
+    _log(
+        f"Training plan: epochs={start_epoch + 1}-{max_epochs}, "
+        f"batch size={training['batch_size']}, accumulation={accumulation}, "
+        f"AMP={amp_enabled}, early stopping patience="
+        f"{training['early_stopping_patience']}"
+    )
 
     for epoch in range(start_epoch + 1, max_epochs + 1):
+        _log(f"Epoch {epoch}/{max_epochs} started")
         if hasattr(train_loader.dataset, "set_epoch"):
             train_loader.dataset.set_epoch(epoch)
         if train_loader.generator is not None:
@@ -583,12 +664,22 @@ def train_from_config(
             policy.device,
             optimizer,
             accumulation,
-            policy.amp_enabled
-            and str(training["amp"]).lower() not in {"false", "0"},
+            amp_enabled,
             gradient_clip,
+            show_progress=True,
         )
+        _log(
+            f"Epoch {epoch} training complete: "
+            f"loss={train_metrics['loss']:.6f}"
+        )
+        _log(f"Epoch {epoch} full-volume validation started")
         val_metrics = validate_full_volumes(
             runtime, val_cases, config, policy.device
+        )
+        _log(
+            f"Epoch {epoch} validation complete: "
+            f"loss={val_metrics['loss']:.6f}, Dice={val_metrics['dice']:.6f}, "
+            f"clDice={val_metrics['cldice']:.6f}, IoU={val_metrics['iou']:.6f}"
         )
         scheduler.step()
         row: dict[str, float | int] = {
@@ -643,13 +734,22 @@ def train_from_config(
             scheduler=scheduler,
         )
         torch.save(state, checkpoint_dir / "latest.pt")
+        _log(f"Saved latest checkpoint: {checkpoint_dir / 'latest.pt'}")
         if improved:
             torch.save(state, checkpoint_dir / "best.pt")
+            _log(
+                f"New best model at epoch {epoch}; saved: "
+                f"{checkpoint_dir / 'best.pt'}"
+            )
         with history_path.open("w", newline="", encoding="utf-8") as stream:
             writer_csv = csv.DictWriter(stream, fieldnames=list(row))
             writer_csv.writeheader()
             writer_csv.writerows(history)
         if stale_epochs >= int(training["early_stopping_patience"]):
+            _log(
+                f"Early stopping at epoch {epoch}: no improvement for "
+                f"{stale_epochs} epochs"
+            )
             break
     writer.close()
     summary = {
@@ -669,5 +769,9 @@ def train_from_config(
     }
     (metrics_dir / "summary.json").write_text(
         json.dumps(summary, indent=2), encoding="utf-8"
+    )
+    _log(
+        f"Training finished: last epoch={summary['last_epoch']}, "
+        f"best epoch={best_epoch}, best Dice={best_dice}, run={run_dir}"
     )
     return run_dir
