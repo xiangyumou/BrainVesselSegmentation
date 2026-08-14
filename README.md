@@ -171,14 +171,27 @@ Submit the architecture-matched random-initialization experiment:
 sbatch dicc/scripts/train_lingfeng_scratch_topcow.sh
 ```
 
+After all 125 registrations pass QC, submit the multimodal teacher. Once it finishes,
+submit the MRA student KD job:
+
+```bash
+sbatch dicc/scripts/train_lingfeng_teacher_topcow.sh
+sbatch dicc/scripts/train_lingfeng_student_kd_topcow.sh
+```
+
+The student script automatically selects the newest completed, configuration-matching
+teacher `best.pt`. Once a student run exists, later submissions keep using the teacher
+checkpoint recorded in that run rather than switching to a newer teacher.
+
 The job requests one A100 GPU, 4 CPU cores, and 32 GB RAM, while leaving the time limit to
 the cluster default. It uses the `mu` Conda environment directly, sets the staged LFModel
 raw copy as `BVS_DATA_ROOT`, and always passes
 `--c`: a compatible interrupted run resumes in place, while the first submission starts a
-new run using the selected configuration. Slurm stdout and stderr are written under `dicc/logs/`.
-Both streams are merged into one `bvs-topcow-ft_<job-id>.log` or
-`bvs-topcow-scratch_<job-id>.log` file so initialization, progress, warnings, and errors
-remain in chronological order.
+new run using the selected configuration. A matching run that already has a valid
+`metrics/summary.json` is complete and exits successfully before CUDA, data, or model
+initialization. This makes every command above safe to resubmit under an 8-hour QoS.
+Slurm stdout and stderr are written together under `dicc/logs/` so initialization,
+progress, warnings, and errors remain in chronological order.
 
 The fine-tune and scratch configurations use the same Lingfeng MRA student architecture,
 split, preprocessing, loss, optimizer, and 20-epoch schedule. Early stopping is disabled in

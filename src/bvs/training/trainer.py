@@ -76,6 +76,41 @@ def find_continue_run(config: dict[str, Any]) -> tuple[Path, Path]:
     )
 
 
+def find_completed_run(config: dict[str, Any]) -> Path:
+    """Return the newest completed run whose saved configuration matches config."""
+    experiment_root = (
+        project_path(config, config["output_root"]) / str(config["experiment_name"])
+    )
+    requested = _config_for_continue(config)
+    if experiment_root.is_dir():
+        for run_dir in sorted(experiment_root.iterdir(), reverse=True):
+            saved_config = run_dir / "resolved_config.yaml"
+            summary_path = run_dir / "metrics/summary.json"
+            if (
+                not run_dir.is_dir()
+                or not saved_config.is_file()
+                or not summary_path.is_file()
+            ):
+                continue
+            saved = yaml.safe_load(saved_config.read_text(encoding="utf-8"))
+            if not isinstance(saved, dict) or _config_for_continue(saved) != requested:
+                continue
+            try:
+                summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if (
+                isinstance(summary, dict)
+                and summary.get("experiment_name") == config["experiment_name"]
+                and summary.get("stage") == config["stage"]
+            ):
+                return run_dir
+    raise FileNotFoundError(
+        "No completed run with an identical resolved configuration was found under "
+        f"{experiment_root}"
+    )
+
+
 def _load_history(path: Path) -> list[dict[str, float | int]]:
     if not path.is_file():
         return []
@@ -604,6 +639,13 @@ def train_from_config(
     clean_config = _clean_config(config)
     continued_run: Path | None = None
     if continue_run:
+        try:
+            completed_run = find_completed_run(config)
+        except FileNotFoundError:
+            pass
+        else:
+            _log(f"Training already completed; skipping run: {completed_run}")
+            return completed_run
         _log("Searching for the newest run with an identical resolved configuration")
         try:
             continued_run, resume_checkpoint = find_continue_run(config)

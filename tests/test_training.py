@@ -21,6 +21,7 @@ from bvs.training.trainer import (
     _resume,
     _run_epoch,
     _training_epochs,
+    find_completed_run,
     find_continue_run,
     validation_improved,
 )
@@ -79,6 +80,36 @@ def test_continue_runs_are_isolated_by_experiment(tmp_path: Path) -> None:
 
     assert find_continue_run(fine_tune)[0].parent.name == fine_tune["experiment_name"]
     assert find_continue_run(scratch)[0].parent.name == scratch["experiment_name"]
+
+
+def test_completed_run_requires_matching_config_and_valid_summary(
+    tmp_path: Path,
+) -> None:
+    config = load_config(
+        Path(__file__).resolve().parents[1]
+        / "configs/train/unet3d_topcow_binary.yaml"
+    )
+    config["output_root"] = str(tmp_path / "runs")
+    run = Path(config["output_root"]) / config["experiment_name"] / "run"
+    (run / "metrics").mkdir(parents=True)
+    clean = {key: value for key, value in config.items() if key != "_config_path"}
+    (run / "resolved_config.yaml").write_text(
+        yaml.safe_dump(clean, sort_keys=False), encoding="utf-8"
+    )
+    summary = run / "metrics/summary.json"
+    summary.write_text("not-json", encoding="utf-8")
+    with pytest.raises(FileNotFoundError, match="No completed run"):
+        find_completed_run(config)
+
+    summary.write_text(
+        '{"experiment_name": "unet3d_topcow_binary", "stage": "supervised"}',
+        encoding="utf-8",
+    )
+    assert find_completed_run(config) == run
+
+    config["training"]["batch_size"] += 1
+    with pytest.raises(FileNotFoundError, match="No completed run"):
+        find_completed_run(config)
 
 
 def test_epochs_are_controlled_by_configuration_value() -> None:

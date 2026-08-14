@@ -93,10 +93,8 @@ def test_synthetic_train_predict_evaluate(tmp_path: Path) -> None:
     continued_run = train_from_config(config, continue_run=True)
     assert continued_run == run_dir
     continued_environment = json.loads(environment.read_text(encoding="utf-8"))
-    assert continued_environment["resume_checkpoint"] == str(
-        run_dir / "checkpoints/latest.pt"
-    )
-    assert continued_environment["resume_from_epoch"] == 1
+    assert continued_environment["resume_checkpoint"] is None
+    assert continued_environment["resume_from_epoch"] == 0
     with history.open(newline="", encoding="utf-8") as stream:
         assert len(list(csv.DictReader(stream))) == 1
 

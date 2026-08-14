@@ -68,8 +68,11 @@ not by itself proof of correct anatomy.
 Before teacher or KD training, require exactly 125 registered images, `failed: 0` in the
 full-run summary, exact output/MRA geometry for every case, and visual acceptance of all QC
 images. The MRA fine-tune and scratch profiles can use raw data immediately. Teacher and KD
-must wait for full registration acceptance. Set the KD `model.teacher_checkpoint` to the
-accepted teacher run's `best.pt` before starting KD. Training outputs remain under `runs/`.
+must wait for full registration acceptance. Submit
+`dicc/scripts/train_lingfeng_teacher_topcow.sh` repeatedly until it completes, then submit
+`dicc/scripts/train_lingfeng_student_kd_topcow.sh` repeatedly for KD. Both scripts resume
+with `--c` and skip completed runs. The student script automatically selects and then pins
+the latest completed teacher `best.pt`. Training outputs remain under `runs/`.
 
 ## 中文
 
@@ -102,5 +105,7 @@ metric 非有限、写入中断或几何不一致都会记录失败，并使批�
 
 teacher/KD 训练前必须确认：已生成 125 个 CTA、全量 summary 的 `failed` 为 0、每例输出
 几何与 MRA 严格相同，并完成人工 QC。fine-tune/scratch 可直接读取 raw；teacher/KD 必须等
-全量验收后再启动。KD 启动前还需把配置中的 `model.teacher_checkpoint` 改为已验收 teacher
-运行的 `best.pt`。训练产物仍写入项目 `runs/`，不得由数据准备流程修改或删除。
+全量验收后再启动。可重复提交 `train_lingfeng_teacher_topcow.sh`，完成后再重复提交
+`train_lingfeng_student_kd_topcow.sh`；两个脚本都通过 `--c` 续训，完成后自动跳过。student
+脚本会自动选择最新完成的 teacher `best.pt`，并在 KD 首次启动后固定使用该 checkpoint。
+训练产物仍写入项目 `runs/`，不得由数据准备流程修改或删除。
