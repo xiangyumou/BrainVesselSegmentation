@@ -199,7 +199,7 @@ class MultimodalPatchDataset(Dataset):
 
     def _load_case(
         self, case: MultimodalCase
-    ) -> tuple[dict[str, np.ndarray], np.ndarray]:
+    ) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray]:
         key = (
             case.case_id,
             tuple((name, str(case.modalities[name])) for name in self.modalities),
@@ -233,7 +233,9 @@ class MultimodalPatchDataset(Dataset):
             label = crop_or_pad_array(label, self.crop_or_pad_size)
         for array in [*images.values(), label]:
             array.setflags(write=False)
-        value = (images, label)
+        positive_coordinates = np.argwhere(label > 0)
+        positive_coordinates.setflags(write=False)
+        value = (images, label, positive_coordinates)
         self._cache.put(key, value)
         return value
 
@@ -242,7 +244,7 @@ class MultimodalPatchDataset(Dataset):
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         case = self.cases[index % len(self.cases)]
-        images, full_label = self._load_case(case)
+        images, full_label, positive_coordinates = self._load_case(case)
         rng = np.random.default_rng(
             self.seed + self.epoch * 1_000_003 + int(index)
         )
@@ -252,6 +254,7 @@ class MultimodalPatchDataset(Dataset):
             self.patch_size,
             self.positive_probability,
             rng,
+            positive_coordinates,
         )
         return {
             "inputs": inputs,
@@ -286,7 +289,9 @@ class TopCoWPatchDataset(Dataset):
     def set_epoch(self, epoch: int) -> None:
         self.epoch = int(epoch)
 
-    def _load_case(self, case: TopCoWCase) -> tuple[np.ndarray, np.ndarray]:
+    def _load_case(
+        self, case: TopCoWCase
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         key = (
             case.case_id,
             str(case.image),
@@ -301,7 +306,9 @@ class TopCoWPatchDataset(Dataset):
         )
         image.setflags(write=False)
         label.setflags(write=False)
-        value = (image, label)
+        positive_coordinates = np.argwhere(label > 0)
+        positive_coordinates.setflags(write=False)
+        value = (image, label, positive_coordinates)
         self._cache.put(key, value)
         return value
 
@@ -310,7 +317,7 @@ class TopCoWPatchDataset(Dataset):
 
     def __getitem__(self, index: int):
         case = self.cases[index % len(self.cases)]
-        image, label = self._load_case(case)
+        image, label, positive_coordinates = self._load_case(case)
         rng = np.random.default_rng(
             self.seed + self.epoch * 1_000_003 + int(index)
         )
@@ -320,5 +327,6 @@ class TopCoWPatchDataset(Dataset):
             self.patch_size,
             self.positive_probability,
             rng,
+            positive_coordinates,
         )
         return {"image": image_patch, "label": label_patch, "case_id": case.case_id}

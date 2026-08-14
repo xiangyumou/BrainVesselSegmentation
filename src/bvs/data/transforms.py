@@ -61,10 +61,15 @@ def sample_patch(
     patch_size: tuple[int, int, int] = (48, 48, 48),
     positive_probability: float = 0.7,
     rng: np.random.Generator | None = None,
+    positive_coordinates: np.ndarray | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     rng = rng or np.random.default_rng()
     size = np.asarray(patch_size)
-    positive = np.argwhere(label > 0)
+    positive = (
+        np.argwhere(label > 0)
+        if positive_coordinates is None
+        else positive_coordinates
+    )
     if len(positive) and rng.random() < positive_probability:
         center = positive[rng.integers(len(positive))]
     else:
@@ -84,6 +89,7 @@ def sample_multimodal_patch(
     patch_size: tuple[int, int, int],
     positive_probability: float,
     rng: np.random.Generator,
+    positive_coordinates: np.ndarray | None = None,
 ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
     if not images:
         raise ValueError("At least one modality is required")
@@ -91,7 +97,11 @@ def sample_multimodal_patch(
     if len(shapes) != 1:
         raise ValueError(f"Modalities and label must share a shape: {sorted(shapes)}")
     size = np.asarray(patch_size)
-    positive = np.argwhere(label > 0)
+    positive = (
+        np.argwhere(label > 0)
+        if positive_coordinates is None
+        else positive_coordinates
+    )
     if len(positive) and rng.random() < positive_probability:
         center = positive[rng.integers(len(positive))]
     else:

@@ -1,18 +1,16 @@
 schema_version: 1
-experiment_name: lingfeng_student_transfer_topcow_binary
+experiment_name: lingfeng_student_scratch_topcow_binary
 stage: supervised
 seed: 42
 device: auto
 output_root: runs
 model:
-  name: lingfeng_student_transfer
+  name: configurable_lingfeng
   modalities: [mra]
   student_modality: mra
   in_channels: {mra: 1}
   num_classes: 2
   base_channels: 16
-  pretrained_checkpoint: artifacts/checkpoints/lingfeng-student_best_checkpoint_multimodaltune9.pt
-  freeze_encoder: false
 data:
   adapter: pattern_directory
   root: null

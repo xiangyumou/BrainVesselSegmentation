@@ -299,7 +299,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             unpack_pattern_spec(spec, "imagesTr", f"data.modalities.{name}")
         unpack_pattern_spec(data.get("label", {}), "labelsTr", "data.label")
     for key in ("patch_size", "crop_or_pad_size"):
-        if key in data:
+        if key in data and data[key] is not None:
             _triple(data[key], f"data.{key}")
     if data.get("normalization") not in {"nonzero_zscore", "precomputed"}:
         raise ValueError(

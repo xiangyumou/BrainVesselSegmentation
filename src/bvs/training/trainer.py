@@ -145,7 +145,11 @@ def _multimodal_dataset(
         student_modality=config["model"]["student_modality"],
         patch_size=tuple(data["patch_size"]),
         samples_per_volume=int(samples),
-        crop_or_pad_size=tuple(data["crop_or_pad_size"]),
+        crop_or_pad_size=(
+            tuple(data["crop_or_pad_size"])
+            if data.get("crop_or_pad_size") is not None
+            else None
+        ),
         normalization=data["normalization"],
         augmentation=data["augmentation"] if split_name == "train" else {"enabled": False},
         label_strategy=strategy,
@@ -279,11 +283,16 @@ def _run_epoch(
             or completed == len(loader)
             or completed % progress_interval == 0
         ):
-            _log(
+            progress = (
                 f"Training batch {completed}/{len(loader)} "
                 f"({100.0 * completed / len(loader):.0f}%), "
-                f"mean loss={totals['loss'] / completed:.6f}"
+                f"epoch running mean loss={totals['loss'] / completed:.6f}"
             )
+            if optimizer is not None:
+                progress += (
+                    f", learning rate={optimizer.param_groups[0]['lr']:.8g}"
+                )
+            _log(progress)
     if not len(loader):
         raise RuntimeError("DataLoader contains no batches")
     return {name: value / len(loader) for name, value in totals.items()}
@@ -451,6 +460,16 @@ def validation_improved(
     if abs(cldice_delta) > tolerance:
         return False
     return best_loss is None or metrics["loss"] < best_loss - tolerance
+
+
+def _training_epochs(start_epoch: int, configured_epochs: int) -> range:
+    return range(start_epoch + 1, configured_epochs + 1)
+
+
+def _early_stopping_triggered(
+    stale_epochs: int, patience: int | None
+) -> bool:
+    return patience is not None and stale_epochs >= patience
 
 
 def _resume(
@@ -652,8 +671,12 @@ def train_from_config(
         f"{training['early_stopping_patience']}"
     )
 
-    for epoch in range(start_epoch + 1, max_epochs + 1):
-        _log(f"Epoch {epoch}/{max_epochs} started")
+    for epoch in _training_epochs(start_epoch, max_epochs):
+        current_learning_rate = optimizer.param_groups[0]["lr"]
+        _log(
+            f"Epoch {epoch}/{max_epochs} started; "
+            f"learning rate={current_learning_rate:.8g}"
+        )
         if hasattr(train_loader.dataset, "set_epoch"):
             train_loader.dataset.set_epoch(epoch)
         if train_loader.generator is not None:
@@ -745,7 +768,9 @@ def train_from_config(
             writer_csv = csv.DictWriter(stream, fieldnames=list(row))
             writer_csv.writeheader()
             writer_csv.writerows(history)
-        if stale_epochs >= int(training["early_stopping_patience"]):
+        if _early_stopping_triggered(
+            stale_epochs, training["early_stopping_patience"]
+        ):
             _log(
                 f"Early stopping at epoch {epoch}: no improvement for "
                 f"{stale_epochs} epochs"

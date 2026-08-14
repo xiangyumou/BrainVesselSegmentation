@@ -63,6 +63,12 @@ def test_topcow_adapter_remains_supported() -> None:
     assert validate_config(config)["data"]["adapter"] == "topcow"
 
 
+def test_crop_or_pad_size_can_be_disabled() -> None:
+    config = _config()
+    config["data"]["crop_or_pad_size"] = None
+    assert validate_config(config)["data"]["crop_or_pad_size"] is None
+
+
 @pytest.mark.parametrize(
     "field",
     ["sampler", "queue_length", "patch_overlap", "test_root"],

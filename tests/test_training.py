@@ -17,8 +17,10 @@ from bvs.training.losses import (
 )
 from bvs.training.stages import build_stage
 from bvs.training.trainer import (
+    _early_stopping_triggered,
     _resume,
     _run_epoch,
+    _training_epochs,
     find_continue_run,
     validation_improved,
 )
@@ -57,6 +59,66 @@ def test_continue_selects_newest_identical_run(tmp_path: Path) -> None:
     config["training"]["batch_size"] += 1
     with pytest.raises(FileNotFoundError, match="identical resolved configuration"):
         find_continue_run(config)
+
+
+def test_continue_runs_are_isolated_by_experiment(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[1]
+    fine_tune = load_config(
+        root / "configs/train/lingfeng_transfer_topcow_binary.yaml"
+    )
+    scratch = load_config(root / "configs/train/lingfeng_scratch_topcow_binary.yaml")
+    for config in (fine_tune, scratch):
+        config["output_root"] = str(tmp_path / "runs")
+        run = Path(config["output_root"]) / config["experiment_name"] / "run"
+        (run / "checkpoints").mkdir(parents=True)
+        clean = {key: value for key, value in config.items() if key != "_config_path"}
+        (run / "resolved_config.yaml").write_text(
+            yaml.safe_dump(clean, sort_keys=False), encoding="utf-8"
+        )
+        (run / "checkpoints/latest.pt").touch()
+
+    assert find_continue_run(fine_tune)[0].parent.name == fine_tune["experiment_name"]
+    assert find_continue_run(scratch)[0].parent.name == scratch["experiment_name"]
+
+
+def test_epochs_are_controlled_by_configuration_value() -> None:
+    assert list(_training_epochs(0, 3)) == [1, 2, 3]
+    assert list(_training_epochs(2, 5)) == [3, 4, 5]
+    assert list(_training_epochs(5, 5)) == []
+
+
+def test_optional_early_stopping_patience() -> None:
+    assert not _early_stopping_triggered(2, 3)
+    assert _early_stopping_triggered(3, 3)
+    assert not _early_stopping_triggered(100, None)
+
+
+def test_fine_tune_loads_checkpoint_while_scratch_does_not(
+    monkeypatch,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    fine_tune = load_config(
+        root / "configs/train/lingfeng_transfer_topcow_binary.yaml"
+    )
+    scratch = load_config(root / "configs/train/lingfeng_scratch_topcow_binary.yaml")
+    loaded = []
+
+    def record_load(model, checkpoint):
+        loaded.append(checkpoint)
+
+    monkeypatch.setattr(
+        "bvs.checkpoints.load_lingfeng_student_checkpoint", record_load
+    )
+    fine_tune_runtime = build_stage(fine_tune, torch.device("cpu"))
+    scratch_runtime = build_stage(scratch, torch.device("cpu"))
+
+    assert loaded == [
+        root
+        / "artifacts/checkpoints/lingfeng-student_best_checkpoint_multimodaltune9.pt"
+    ]
+    assert list(fine_tune_runtime.model.state_dict()) == list(
+        scratch_runtime.model.state_dict()
+    )
 
 
 def test_single_training_and_validation_step() -> None:

@@ -84,7 +84,9 @@ them with `numpy.random.default_rng(42)`, and slices 80 train, 20 validation, an
 test cases.
 
 MRA is Z-score normalized over non-zero voxels while background stays zero. Training samples
-`48³` patches with a 0.7 probability of centering on vessel foreground. Labels use
+`48³` patches across the complete original volume, with a 0.7 probability of centering on
+vessel foreground and a 0.3 probability of choosing a random image location. Patches that
+cross a volume boundary are zero-padded. Labels use
 `label > 0`, including the non-contiguous class value 15.
 
 The three Lingfeng legacy reproduction profiles use `precomputed` normalization because
@@ -133,6 +135,7 @@ are fatal. Teacher and T1/T2/PD keys are listed as ignored.
 ```bash
 bvs train --config configs/train/unet3d_topcow_binary.yaml
 bvs train --config configs/train/lingfeng_transfer_topcow_binary.yaml
+bvs train --config configs/train/lingfeng_scratch_topcow_binary.yaml
 ```
 
 To continue the newest run whose complete resolved configuration is identical, use:
@@ -158,22 +161,39 @@ Submit the Lingfeng TopCoW fine-tuning job from the repository root:
 sbatch dicc/scripts/train_lingfeng_transfer_topcow.sh
 ```
 
+Submit the architecture-matched random-initialization experiment:
+
+```bash
+sbatch dicc/scripts/train_lingfeng_scratch_topcow.sh
+```
+
 The job requests one A100 GPU, 4 CPU cores, 32 GB RAM, and 24 hours. It uses the `mu` Conda
 environment directly, sets the local TopCoW release as `BVS_DATA_ROOT`, and always passes
 `--c`: a compatible interrupted run resumes in place, while the first submission starts a
-new fine-tuning run. Slurm stdout and stderr are written under `dicc/logs/`.
-Both streams are merged into one `bvs-topcow-ft_<job-id>.log` file so initialization,
-progress, warnings, and errors remain in chronological order.
+new run using the selected configuration. Slurm stdout and stderr are written under `dicc/logs/`.
+Both streams are merged into one `bvs-topcow-ft_<job-id>.log` or
+`bvs-topcow-scratch_<job-id>.log` file so initialization, progress, warnings, and errors
+remain in chronological order.
 
-Both configurations use Adam, StepLR, CE + Dice loss, deterministic label-aware patch
-sampling, and whole-volume sliding-window validation after every epoch. The transfer profile
+The fine-tune and scratch configurations use the same Lingfeng MRA student architecture,
+split, preprocessing, loss, optimizer, and 20-epoch schedule. Early stopping is disabled in
+these two profiles so both complete all 20 epochs. The transfer profile loads the archived
+checkpoint and fine-tunes the complete model; the scratch profile uses random initialization.
+Other profiles retain their configured early-stopping behavior. The transfer profile also
 supports `model.freeze_encoder: true`; when enabled, only the student decoder and metric head
 are optimized.
 
 Training logs initialization, device selection, data and model discovery, batch progress at
-5% intervals, every full-volume validation case, epoch metrics, checkpoint writes, resume
-state, and early stopping to the terminal in real time. The final JSON result remains on
-standard output so it can still be consumed by scripts.
+5% intervals, the current learning rate, every full-volume validation case, epoch metrics,
+checkpoint writes, resume state, and early stopping to the terminal in real time. Batch loss
+is explicitly reported as the running mean for the current epoch. The final JSON result
+remains on standard output so it can still be consumed by scripts.
+
+Starting a new epoch does not reset the model, optimizer, or scheduler. Each epoch uses a
+different deterministic patch sequence and batch order. Its first running loss reflects only
+the first few newly sampled patches, while the preceding epoch's final loss averages all
+batches, so a temporary increase at the boundary is expected. Compare complete-epoch
+`train_loss`, `val_loss`, and `val_dice` values when assessing the two experiments.
 
 `best.pt` and early stopping use a deterministic lexicographic rule: mean validation Dice,
 then mean clDice when Dice differs by at most `1e-6`, then validation loss when both metrics

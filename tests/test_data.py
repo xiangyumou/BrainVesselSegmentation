@@ -14,6 +14,7 @@ from bvs.data.topcow import (
 )
 from bvs.data.dataset import (
     MultimodalCase,
+    MultimodalPatchDataset,
     TopCoWPatchDataset,
     discover_cases,
     discover_lingfeng_cases,
@@ -165,3 +166,36 @@ def test_patch_sampling_is_deterministic_by_epoch(tmp_path: Path) -> None:
     dataset.set_epoch(1)
     changed = dataset[0]["image"]
     assert not np.array_equal(first.numpy(), changed.numpy())
+
+
+def test_no_center_crop_samples_foreground_from_full_volume_edge(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "mra.nii.gz"
+    label_path = tmp_path / "label.nii.gz"
+    image = np.zeros((20, 20, 20), dtype=np.float32)
+    label = np.zeros_like(image, dtype=np.uint8)
+    image[1, 1, 1] = 5.0
+    label[1, 1, 1] = 1
+    nib.save(nib.Nifti1Image(image, np.eye(4)), image_path)
+    nib.save(nib.Nifti1Image(label, np.eye(4)), label_path)
+    dataset = MultimodalPatchDataset(
+        [MultimodalCase("edge", {"mra": image_path}, label_path)],
+        modalities=["mra"],
+        student_modality="mra",
+        patch_size=(6, 6, 6),
+        samples_per_volume=1,
+        crop_or_pad_size=None,
+        positive_probability=1.0,
+        seed=42,
+        cache_max_cases=1,
+    )
+
+    sample = dataset[0]
+
+    assert sample["label"].shape == (6, 6, 6)
+    assert sample["student_image"].shape == (1, 6, 6, 6)
+    assert sample["label"].sum().item() == 1
+    _, full_label, positive_coordinates = dataset._load_case(dataset.cases[0])
+    assert full_label.shape == (20, 20, 20)
+    assert positive_coordinates.tolist() == [[1, 1, 1]]
