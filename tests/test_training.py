@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
@@ -312,12 +313,99 @@ class _AccumulationRuntime:
         return loss, {"segmentation": float(loss.detach())}
 
 
+class _FiniteLossInfiniteGradient(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, value):
+        return value * 0.0
+
+    @staticmethod
+    def backward(ctx, gradient):
+        return torch.full_like(gradient, float("inf"))
+
+
+class _OverflowRuntime(_AccumulationRuntime):
+    def loss(self, batch):
+        if float(batch["image"].item()) == 0.0:
+            loss = _FiniteLossInfiniteGradient.apply(self.parameter)
+        else:
+            loss = self.parameter * batch["image"].float().mean()
+        return loss, {"segmentation": float(loss.detach())}
+
+
+class _RecoveringGradScaler:
+    instances = []
+
+    def __init__(self, device, enabled):
+        assert device == "cuda"
+        assert enabled
+        self.current_scale = 65536.0
+        self.found_nonfinite = False
+        self.skipped_steps = 0
+        self.instances.append(self)
+
+    def scale(self, loss):
+        return loss
+
+    def get_scale(self):
+        return self.current_scale
+
+    def unscale_(self, optimizer):
+        self.found_nonfinite = any(
+            parameter.grad is not None
+            and not bool(torch.isfinite(parameter.grad).all())
+            for group in optimizer.param_groups
+            for parameter in group["params"]
+        )
+
+    def step(self, optimizer):
+        if self.found_nonfinite:
+            self.skipped_steps += 1
+        else:
+            optimizer.step()
+
+    def update(self):
+        if self.found_nonfinite:
+            self.current_scale *= 0.5
+
+
 def test_gradient_accumulation_scales_partial_final_group() -> None:
     runtime = _AccumulationRuntime()
     optimizer = torch.optim.SGD(runtime.trainable_parameters, lr=1.0)
     loader = [{"image": torch.tensor(float(value))} for value in range(1, 6)]
     _run_epoch(runtime, loader, torch.device("cpu"), optimizer, 4, False, None)
     assert torch.allclose(runtime.parameter, torch.tensor(-7.5))
+
+
+def test_fp32_nonfinite_gradient_norm_remains_fatal() -> None:
+    runtime = _OverflowRuntime()
+    optimizer = torch.optim.SGD(runtime.trainable_parameters, lr=1.0)
+    loader = [{"image": torch.tensor(0.0)}]
+
+    with pytest.raises(FloatingPointError, match="Non-finite gradient norm"):
+        _run_epoch(runtime, loader, torch.device("cpu"), optimizer, 1, False, 1.0)
+
+
+def test_amp_overflow_skips_step_reduces_scale_and_continues(
+    monkeypatch, capsys
+) -> None:
+    _RecoveringGradScaler.instances.clear()
+    monkeypatch.setattr(
+        "bvs.training.trainer.torch.amp.GradScaler", _RecoveringGradScaler
+    )
+    monkeypatch.setattr(
+        "bvs.training.trainer.torch.autocast", lambda **kwargs: nullcontext()
+    )
+    runtime = _OverflowRuntime()
+    optimizer = torch.optim.SGD(runtime.trainable_parameters, lr=1.0)
+    loader = [{"image": torch.tensor(0.0)}, {"image": torch.tensor(1.0)}]
+
+    _run_epoch(runtime, loader, torch.device("cpu"), optimizer, 1, True, 1.0)
+
+    scaler = _RecoveringGradScaler.instances[0]
+    assert scaler.skipped_steps == 1
+    assert scaler.current_scale == 32768.0
+    assert torch.allclose(runtime.parameter, torch.tensor(-1.0))
+    assert "AMP gradient overflow detected; skipped optimizer step" in capsys.readouterr().err
 
 
 def _supervised_resume_fixture(tmp_path):

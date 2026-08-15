@@ -349,15 +349,24 @@ def _run_epoch(
             scaler.scale(scaled_loss).backward()
             update = (step + 1) % accumulation_steps == 0 or step + 1 == len(loader)
             if update:
+                scale_before = scaler.get_scale() if amp_enabled else None
                 if gradient_clip_norm is not None:
                     scaler.unscale_(optimizer)
                     norm = torch.nn.utils.clip_grad_norm_(
                         runtime.trainable_parameters, gradient_clip_norm
                     )
-                    if not torch.isfinite(norm):
+                    if not torch.isfinite(norm) and not amp_enabled:
                         raise FloatingPointError(f"Non-finite gradient norm: {float(norm)}")
                 scaler.step(optimizer)
                 scaler.update()
+                if scale_before is not None:
+                    scale_after = scaler.get_scale()
+                    if scale_after < scale_before:
+                        _log(
+                            "AMP gradient overflow detected; skipped optimizer "
+                            f"step and reduced scale from {scale_before:g} to "
+                            f"{scale_after:g}"
+                        )
                 optimizer.zero_grad(set_to_none=True)
         totals["loss"] += float(loss.detach().cpu())
         for name, value in components.items():
